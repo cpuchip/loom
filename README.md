@@ -69,8 +69,29 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
   surfaced in the CLI; a condenser for very long sessions (pattern from OpenHands'
   `LLMSummarizingCondenser`); structured event streaming (not just the final text);
   routing/role assignment across the panel; a local backend (llama-chip) so the panel
-  can include a fast local model. Verify the agy transcript-recovery on the real path
-  before depending on it.
+  can include a fast local model.
+
+## ACP — researched 2026-06-29, decision: skip for now
+
+ACP (the [Agent Client Protocol](https://agentclientprotocol.com), JSON-RPC-2.0 over
+stdio, now folding toward the Linux Foundation A2A standard) is an *optional future
+backend*, not a near-term need:
+
+- **Claude Code has no native ACP** (real-path-confirmed on v2.1.196); it'd require Zed's
+  Node adapter (`@agentclientprotocol/claude-agent-acp`, renamed from `@zed-industries/…`
+  — verify the exact name before installing). Our **direct stream-json claude backend is
+  dependency-free, single-process, and faster** — no reason to route it through ACP.
+- **Codex has no native ACP** either (community adapters only).
+- **Gemini CLI (`gemini`, the standalone — NOT `agy`) DOES have native `--acp`.** That's
+  the one real win: a small ACP-client backend driving `gemini --acp` would give a clean
+  Gemini (streaming + resume + tool-approval) and replace the agy transcript-scrape — *if*
+  we want Gemini badly enough to install `gemini`.
+
+**Decision:** keep the direct CLI backends; add an *optional* ACP-client backend only when
+we want `gemini --acp` as a first-class Gemini, or if Codex ships native ACP. ACP's
+permission/approval surface is built for interactive IDEs, not headless orchestration, so
+it buys little for our use. (ACP→A2A is worth watching — same lineage as pg-ai-stewards'
+A2A engine.)
 
 ## Related
 
