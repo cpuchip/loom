@@ -1,0 +1,25 @@
+# loom-claude — a sandboxed Claude Code agent.
+#
+# loom runs Claude Code inside this container so the substrate can command a full
+# agentic session that CANNOT touch the host beyond the repo mounted at /work.
+# The agent's only host paths are /work (the repo, read-write) and /root/.claude
+# (the subscription auth, mounted read-only by loom at run time).
+#
+# Build:  docker build -t loom-claude -f docker/Dockerfile.claude .
+# loom drives it via:  loom run --agent claude --isolate --dir <repo> "…"
+FROM node:22-slim
+
+# git + ripgrep are tools Claude Code uses; ca-certificates for the API.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ripgrep ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI (the `claude` binary on PATH).
+RUN npm install -g @anthropic-ai/claude-code \
+ && claude --version
+
+# Don't run git's safe-directory guard against a bind-mounted repo owned by the host.
+RUN git config --system --add safe.directory '*'
+
+WORKDIR /work
+ENTRYPOINT []

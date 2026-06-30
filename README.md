@@ -53,6 +53,7 @@ loom run   --agent local  --model gemma-4-12b "..."              # a free local 
 loom chat  --agent claude --dir /path/to/repo                    # multi-turn: one msg per stdin line
 loom panel  --agents local,claude "is this function correct?"    # cloud+local council: fan + compare
 loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   # review a git diff or files
+loom run    --agent claude --isolate --dir /path/to/repo "..."   # claude in a docker sandbox (host walled off)
 loom agents                                                      # list backends
 ```
 
@@ -64,6 +65,28 @@ race, and an incomplete `<think>`-stripper — the orphan `</think>` case a self
 `--events` makes loom **observable** — the agent's tool calls (`→ Glob`), tool results, and thinking
 stream to stderr as they happen, while the final answer comes back on stdout. Backends emit what they
 can: `claude` the full stream, `local`/`agy` a coarse one.
+
+## Isolation — the wall (`--isolate`)
+
+A Claude Code session runs in a **real directory with full host access** (it has `Bash`, `Read`, `Write`).
+That's the *asset* — loom can hand the substrate reach into a repo or corpus. It's also the *risk* — a
+full-filesystem agent commanded by a backend could touch the host. `--isolate` is the wall: it runs claude
+**inside a docker container** (`docker/Dockerfile.claude` → `loom-claude`) that sees **only**:
+
+- `/work` — the repo (`--dir`), the one host path the agent can read/write, and
+- `~/.claude/.credentials.json` — the subscription auth, mounted **read-only** (claude writes its own
+  session state into an ephemeral in-container `~/.claude`, gone on `--rm`).
+
+```sh
+docker build -t loom-claude -f docker/Dockerfile.claude .
+loom run --agent claude --isolate --dir /path/to/repo "review this repo"
+```
+
+Verified: the container's `/` is a stock Linux fs + `/work` — **no host `C:\Users`, no host system**. The
+agent can't reach anything you didn't hand it. (Honest scope: the container still holds the OAuth token and
+has network, so it isn't *zero-trust* — a tighter version would use a scoped/short-lived token or egress
+limits. But the **host filesystem is walled**.) `agy --isolate` is not yet wired (its Antigravity auth is
+gnarlier). This is the presiding covenant made literal — delegation needs a lawful wall (D&C 121).
 
 `--model` overrides the model (e.g. `--model haiku`); `--dir` sets the agent's cwd.
 
@@ -81,7 +104,9 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
   **structured event streaming (`SendStream` + `--events`; verified — claude's tool calls/thinking observable, proven on a real tool-using task)** ·
   agy backend (experimental) · `panel` (concurrent council) · **`loom review` (diff/files → fan a review across agents)** · CLI · smoke oracle.
 - ✅ **Dogfooded:** loom reviewed its own code and found+fixed real bugs (history-poisoning, a `SessionID` data race, the orphan-`</think>` CoT-strip gap).
-- **★ Next (2026-06-30):** smooth the `--agent`/`--agents` flag inconsistency + wire `--events` through panel mode; then session resume / a condenser for long reviews / panel role-routing (doer→critic).
+- ✅ **Isolation (`--isolate`):** claude in a docker sandbox (`loom-claude`), host walled to `/work` + read-only creds — verified.
+- **North star:** loom = the substrate's *agent fabric* — a uniform, **walled** way to summon intelligence; its soul is running agentic harnesses (Claude Code, agy) the substrate can't run itself, safely. Axes: agency (raw model ↔ agent) × trust (local ↔ sandboxed ↔ remote).
+- **★ Next:** `agy --isolate`; tighter sandbox (scoped token / egress limits); **remote** claude sessions (the substrate manages claude on another box); panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
 - **Backlog:** session resume (`--resume <session_id>` for claude, `--conversation` for agy)
   surfaced in the CLI; a condenser for very long sessions (pattern from OpenHands'
   `LLMSummarizingCondenser`); routing/role assignment across the panel.

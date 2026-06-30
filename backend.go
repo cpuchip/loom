@@ -21,6 +21,8 @@ type Reply struct {
 type SessionOpts struct {
 	Workdir string // process working dir ("" = inherit)
 	Model   string // backend-specific model override ("" = default)
+	Isolate bool   // run the agent in a docker sandbox (claude backend) — walls the host
+	Image   string // docker image for isolation ("" = loom-claude)
 }
 
 // Backend is a driveable agent CLI.

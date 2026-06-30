@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 )
 
@@ -60,9 +61,14 @@ func (s *claudeSession) ensureStarted(ctx context.Context) error {
 	if s.opts.Model != "" {
 		args = append(args, "--model", s.opts.Model)
 	}
-	cmd := exec.CommandContext(ctx, s.bin, args...)
-	if s.opts.Workdir != "" {
-		cmd.Dir = s.opts.Workdir
+	var cmd *exec.Cmd
+	if s.opts.Isolate {
+		cmd = dockerClaudeCmd(ctx, args, s.opts) // sandboxed: agent sees only /work + creds
+	} else {
+		cmd = exec.CommandContext(ctx, s.bin, args...)
+		if s.opts.Workdir != "" {
+			cmd.Dir = s.opts.Workdir
+		}
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -167,6 +173,38 @@ func emitClaudeContent(onEvent func(Event), ev map[string]any) {
 		}
 	}
 }
+
+// dockerClaudeCmd wraps the claude invocation in `docker run` so the agent is
+// sandboxed: it sees only the workdir (bind-mounted at /work) and the subscription
+// auth (~/.claude, read-only) — never the rest of the host. stream-json passes
+// through `-i`, so the session protocol is unchanged.
+func dockerClaudeCmd(ctx context.Context, claudeArgs []string, opts SessionOpts) *exec.Cmd {
+	wd := opts.Workdir
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
+	home, _ := os.UserHomeDir()
+	image := opts.Image
+	if image == "" {
+		image = "loom-claude"
+	}
+	dockerArgs := []string{
+		"run", "-i", "--rm",
+		"-v", dockerVol(wd) + ":/work",
+		"-w", "/work",
+		// only the credentials file is mounted (read-only) — claude needs to WRITE
+		// its session/todo/log state into /root/.claude, so the rest stays ephemeral
+		// in-container (gone on --rm).
+		"-v", dockerVol(filepath.Join(home, ".claude", ".credentials.json")) + ":/root/.claude/.credentials.json:ro",
+		image, "claude",
+	}
+	dockerArgs = append(dockerArgs, claudeArgs...)
+	return exec.CommandContext(ctx, "docker", dockerArgs...)
+}
+
+// dockerVol normalizes a host path for a Docker bind mount (C:\path → C:/path,
+// which Docker Desktop on Windows accepts).
+func dockerVol(host string) string { return filepath.ToSlash(host) }
 
 func (s *claudeSession) SessionID() string { return s.sessionID }
 
