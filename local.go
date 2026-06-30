@@ -98,10 +98,16 @@ func (s *localSession) SendStream(ctx context.Context, prompt string, onEvent fu
 		}
 	}
 
-	s.history = append(s.history, oaiMsg{Role: "user", Content: prompt})
+	// Build the request history WITHOUT mutating s.history yet — a failed turn must
+	// not leave a dangling user message that poisons the next turn (two consecutive
+	// role:"user" messages, which strict OpenAI servers reject). Commit on success.
+	msgs := append(append([]oaiMsg(nil), s.history...), oaiMsg{Role: "user", Content: prompt})
 	// ≥2000 tokens so reasoning models don't truncate to empty content (see the
 	// LM Studio qwen3 thinking-budget gotcha).
-	body, _ := json.Marshal(oaiReq{Model: model, Messages: s.history, MaxTokens: 4096})
+	body, err := json.Marshal(oaiReq{Model: model, Messages: msgs, MaxTokens: 4096})
+	if err != nil {
+		return Reply{Backend: "local", Err: err.Error()}, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", s.b.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
@@ -133,16 +139,27 @@ func (s *localSession) SendStream(ctx context.Context, prompt string, onEvent fu
 	if strings.TrimSpace(text) == "" {
 		text = choice.ReasoningContent // qwen-style fallback
 	}
+	if strings.TrimSpace(text) == "" {
+		// empty answer — don't commit it (an empty assistant turn poisons context);
+		// surface it as an error so the turn fails cleanly instead.
+		return Reply{Backend: "local", Err: "empty response (no content / reasoning_content)"},
+			fmt.Errorf("local: empty response")
+	}
 	if strings.TrimSpace(choice.ReasoningContent) != "" && strings.TrimSpace(choice.Content) != "" {
 		emit(onEvent, Event{Kind: EvThinking, Backend: "local", Text: choice.ReasoningContent})
 	}
 	emit(onEvent, Event{Kind: EvAssistant, Backend: "local", Text: text})
-	s.history = append(s.history, oaiMsg{Role: "assistant", Content: text})
+	// commit BOTH turns only now that the turn has succeeded
+	s.history = append(msgs, oaiMsg{Role: "assistant", Content: text})
 	emit(onEvent, Event{Kind: EvResult, Backend: "local", Text: text})
 	return Reply{Backend: "local", Text: text, SessionID: "local:" + model, Turns: 1, CostUSD: 0}, nil
 }
 
-func (s *localSession) SessionID() string { return "local:" + s.model }
+func (s *localSession) SessionID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return "local:" + s.model
+}
 func (s *localSession) Close() error      { return nil }
 
 // firstModel returns the first id from /v1/models (used when no model is set).
