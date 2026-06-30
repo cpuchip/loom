@@ -135,9 +135,9 @@ func (s *localSession) SendStream(ctx context.Context, prompt string, onEvent fu
 		return Reply{Backend: "local", Err: "no choices in response"}, fmt.Errorf("local: empty response")
 	}
 	choice := r.Choices[0].Message
-	text := choice.Content
+	text := stripThink(choice.Content)
 	if strings.TrimSpace(text) == "" {
-		text = choice.ReasoningContent // qwen-style fallback
+		text = stripThink(choice.ReasoningContent) // qwen-style fallback
 	}
 	if strings.TrimSpace(text) == "" {
 		// empty answer — don't commit it (an empty assistant turn poisons context);
@@ -185,4 +185,32 @@ func (b LocalBackend) firstModel(ctx context.Context) string {
 		return ml.Data[0].ID
 	}
 	return ""
+}
+
+// stripThink removes <think>…</think> chain-of-thought that reasoning models
+// (qwen3.x, deepseek-r1, …) emit inline in content. It handles BOTH the matched
+// <think>…</think> pairs AND the common llama.cpp/vLLM serving case where the
+// OPENING <think> is seeded into the prompt and not echoed — so the completion is
+// reasoning → </think> → answer with an orphan closing tag. (Models that narrate
+// reasoning with no tags at all still narrate; for those, use a server that
+// separates reasoning_content, or a non-reasoning model.)
+func stripThink(s string) string {
+	// matched pairs first
+	for {
+		i := strings.Index(s, "<think>")
+		if i < 0 {
+			break
+		}
+		j := strings.Index(s[i:], "</think>")
+		if j < 0 {
+			break
+		}
+		s = s[:i] + s[i+j+len("</think>"):]
+	}
+	// any remaining </think> is an orphan (its <think> was prompt-seeded) — strip
+	// everything up to and including it (the reasoning prefix).
+	if i := strings.Index(s, "</think>"); i >= 0 {
+		s = s[i+len("</think>"):]
+	}
+	return strings.TrimSpace(s)
 }

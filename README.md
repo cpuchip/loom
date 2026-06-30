@@ -51,9 +51,15 @@ loom run   --agent claude "summarize the files in this dir"      # one-shot
 loom run   --agent claude --events "count the .go files"         # + stream tool calls/thinking to stderr
 loom run   --agent local  --model gemma-4-12b "..."              # a free local model on llama-chip's :8090
 loom chat  --agent claude --dir /path/to/repo                    # multi-turn: one msg per stdin line
-loom panel --agents local,claude "is this function correct?"     # cloud+local council: fan + compare
+loom panel  --agents local,claude "is this function correct?"    # cloud+local council: fan + compare
+loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   # review a git diff or files
 loom agents                                                      # list backends
 ```
+
+`loom review` loads a **git diff** (default: the working-tree diff vs HEAD; `--diff HEAD`/`main...HEAD`)
+or named **files**, and fans a reviewer prompt across the agent(s) — a one-shot code review, or a
+cloud+local council. loom found and fixed real bugs in its *own* code this way (history-poisoning, a data
+race, and an incomplete `<think>`-stripper — the orphan `</think>` case a self-review caught).
 
 `--events` makes loom **observable** — the agent's tool calls (`→ Glob`), tool results, and thinking
 stream to stderr as they happen, while the final answer comes back on stdout. Backends emit what they
@@ -73,8 +79,9 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 - ✅ Core `Backend`/`Session` interface · claude backend (persistent stream-json) ·
   **local backend (OpenAI-HTTP → `:8090`; verified single + multi-turn against the live rig; cloud+local `panel` proven)** ·
   **structured event streaming (`SendStream` + `--events`; verified — claude's tool calls/thinking observable, proven on a real tool-using task)** ·
-  agy backend (experimental) · `panel` (concurrent council) · CLI · smoke oracle.
-- **★ Next (recommended, 2026-06-30):** **dogfood loom on a real code review** (point it at a real diff/PR with `--events` and let the next real gap surface) → then session resume / a condenser for long reviews / panel routing as the dogfood reveals what's needed.
+  agy backend (experimental) · `panel` (concurrent council) · **`loom review` (diff/files → fan a review across agents)** · CLI · smoke oracle.
+- ✅ **Dogfooded:** loom reviewed its own code and found+fixed real bugs (history-poisoning, a `SessionID` data race, the orphan-`</think>` CoT-strip gap).
+- **★ Next (2026-06-30):** smooth the `--agent`/`--agents` flag inconsistency + wire `--events` through panel mode; then session resume / a condenser for long reviews / panel role-routing (doer→critic).
 - **Backlog:** session resume (`--resume <session_id>` for claude, `--conversation` for agy)
   surfaced in the CLI; a condenser for very long sessions (pattern from OpenHands'
   `LLMSummarizingCondenser`); routing/role assignment across the panel.

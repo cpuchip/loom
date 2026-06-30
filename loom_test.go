@@ -38,6 +38,24 @@ func TestConvIDFromPath(t *testing.T) {
 	}
 }
 
+// TestStripThink locks the CoT-stripping (incl. the orphan </think> case that a
+// loom self-review caught — qwen3.x/vLLM seed the opening tag in the prompt).
+func TestStripThink(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"<think>reason</think>answer", "answer"},          // matched pair
+		{"reason</think>answer", "answer"},                 // orphan closing tag
+		{"<think>a</think>x<think>b</think>y", "xy"},        // multiple pairs
+		{"<think>only reasoning</think>", ""},              // reasoning only
+		{"no tags at all", "no tags at all"},               // untagged → unchanged
+		{"  spaced answer  ", "spaced answer"},             // trims
+	}
+	for _, c := range cases {
+		if got := stripThink(c.in); got != c.want {
+			t.Errorf("stripThink(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestBackendsRegistry(t *testing.T) {
 	bs := Backends()
 	if _, ok := bs["claude"]; !ok {
