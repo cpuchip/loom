@@ -65,7 +65,8 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 
 - ✅ Core `Backend`/`Session` interface · claude backend (persistent stream-json) ·
   agy backend (experimental) · `panel` (concurrent council) · CLI · smoke oracle.
-- **Next:** session resume (`--resume <session_id>` for claude, `--conversation` for agy)
+- **★ Next (recommended, 2026-06-30 — loom PAUSED here):** the **local llama-chip backend** (OpenAI-HTTP → `:8090`; simplest backend, makes `panel` a real cloud+local council) → **structured event streaming** (surface tool_call/tool_result, not just final text — the Hinge-foundational one) → **dogfood loom on a real code review** to surface the next real gap. (Paused to research state-machine / graph patterns for pg-ai-stewards lore.)
+- **Backlog:** session resume (`--resume <session_id>` for claude, `--conversation` for agy)
   surfaced in the CLI; a condenser for very long sessions (pattern from OpenHands'
   `LLMSummarizingCondenser`); structured event streaming (not just the final text);
   routing/role assignment across the panel; a local backend (llama-chip) so the panel
