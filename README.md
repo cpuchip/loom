@@ -23,6 +23,7 @@ The backends are deliberately heterogeneous, because the real CLIs are:
 | backend | transport | multi-turn | notes |
 |---|---|---|---|
 | **claude** | persistent `--input-format stream-json` over stdin/stdout (NDJSON) | one process, many turns, holds context | the good path — **verified** (see below) |
+| **local** | stateless `POST /v1/chat/completions` (OpenAI-compat: llama-chip `:8090`, LM Studio, vLLM) | loom keeps the message history | **the simplest backend** — no process/stdio; **verified** (single + multi-turn) against the live rig; free. Makes `panel` a cloud+local council. |
 | **agy** | one-shot `agy -p` per turn | `--conversation <id>` resume (fresh process/turn) | works (single-turn **verified** in a live `panel`, 2026-06-29) — two headless bugs worked around: stdin-EOF hang (feed empty stdin) + stdout-drop (recover the answer from the transcript file) |
 
 **Why agy is the awkward one:** agy has **no working stdio/stream-json mode** — it's an open, Google-acknowledged gap (antigravity-cli issues [#76](https://github.com/google-antigravity/antigravity-cli/issues/76) stdout-drop, [#119](https://github.com/google-antigravity/antigravity-cli/issues/119) stream-json parity, [#31](https://github.com/google-antigravity/antigravity-cli/issues/31) `--acp`); `--output-format json` is currently *rejected*. The two real workarounds are **transcript-scrape** (what loom does — the right path on Windows) or a **pseudo-TTY wrap** (`script -qec '…' /dev/null`, Unix-only). When agy ships stream-json, the agy backend swaps to the clean path and drops the scrape.
@@ -64,8 +65,9 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 ## Status / roadmap (v0.1)
 
 - ✅ Core `Backend`/`Session` interface · claude backend (persistent stream-json) ·
+  **local backend (OpenAI-HTTP → `:8090`; verified single + multi-turn against the live rig; cloud+local `panel` proven)** ·
   agy backend (experimental) · `panel` (concurrent council) · CLI · smoke oracle.
-- **★ Next (recommended, 2026-06-30 — loom PAUSED here):** the **local llama-chip backend** (OpenAI-HTTP → `:8090`; simplest backend, makes `panel` a real cloud+local council) → **structured event streaming** (surface tool_call/tool_result, not just final text — the Hinge-foundational one) → **dogfood loom on a real code review** to surface the next real gap. (Paused to research state-machine / graph patterns for pg-ai-stewards lore.)
+- **★ Next (recommended, 2026-06-30):** **structured event streaming** (surface tool_call/tool_result, not just the final text — the Hinge-foundational one; turns loom from a black box into an observable harness) → **dogfood loom on a real code review** to surface the next real gap.
 - **Backlog:** session resume (`--resume <session_id>` for claude, `--conversation` for agy)
   surfaced in the CLI; a condenser for very long sessions (pattern from OpenHands'
   `LLMSummarizingCondenser`); structured event streaming (not just the final text);

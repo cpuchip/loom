@@ -43,5 +43,6 @@ func Backends() map[string]Backend {
 	return map[string]Backend{
 		"claude": ClaudeBackend{Bin: "claude"},
 		"agy":    DefaultAgyBackend(),
+		"local":  DefaultLocalBackend(),
 	}
 }
