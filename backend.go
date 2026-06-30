@@ -32,8 +32,14 @@ type Backend interface {
 // Session is a (possibly long-lived) conversation with one agent. Send may be
 // called repeatedly; the session holds context across turns where the backend
 // supports it.
+//
+// Send is the simple final-text path. SendStream is the same, but invokes onEvent
+// for each intermediate event (assistant text, thinking, tool calls/results) as
+// it arrives — so a caller can observe the agent's work, not just its conclusion.
+// Send is conventionally implemented as SendStream(ctx, prompt, nil).
 type Session interface {
 	Send(ctx context.Context, prompt string) (Reply, error)
+	SendStream(ctx context.Context, prompt string, onEvent func(Event)) (Reply, error)
 	SessionID() string
 	Close() error
 }

@@ -54,6 +54,10 @@ type agySession struct {
 }
 
 func (s *agySession) Send(ctx context.Context, prompt string) (Reply, error) {
+	return s.SendStream(ctx, prompt, nil)
+}
+
+func (s *agySession) SendStream(ctx context.Context, prompt string, onEvent func(Event)) (Reply, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	args := []string{"-p", prompt, "--dangerously-skip-permissions"}
@@ -71,6 +75,8 @@ func (s *agySession) Send(ctx context.Context, prompt string) (Reply, error) {
 	if s.convID == "" && conv != "" {
 		s.convID = conv
 	}
+	emit(onEvent, Event{Kind: EvAssistant, Backend: "agy", Text: text})
+	emit(onEvent, Event{Kind: EvResult, Backend: "agy", Text: text})
 	r := Reply{Backend: "agy", Text: text, SessionID: s.convID}
 	if strings.TrimSpace(text) == "" {
 		r.Err = "agy: empty transcript recovery (response may not have flushed; or no transcript under BrainDir)"

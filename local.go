@@ -81,6 +81,10 @@ type oaiResp struct {
 }
 
 func (s *localSession) Send(ctx context.Context, prompt string) (Reply, error) {
+	return s.SendStream(ctx, prompt, nil)
+}
+
+func (s *localSession) SendStream(ctx context.Context, prompt string, onEvent func(Event)) (Reply, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -124,11 +128,17 @@ func (s *localSession) Send(ctx context.Context, prompt string) (Reply, error) {
 	if len(r.Choices) == 0 {
 		return Reply{Backend: "local", Err: "no choices in response"}, fmt.Errorf("local: empty response")
 	}
-	text := r.Choices[0].Message.Content
+	choice := r.Choices[0].Message
+	text := choice.Content
 	if strings.TrimSpace(text) == "" {
-		text = r.Choices[0].Message.ReasoningContent // qwen-style fallback
+		text = choice.ReasoningContent // qwen-style fallback
 	}
+	if strings.TrimSpace(choice.ReasoningContent) != "" && strings.TrimSpace(choice.Content) != "" {
+		emit(onEvent, Event{Kind: EvThinking, Backend: "local", Text: choice.ReasoningContent})
+	}
+	emit(onEvent, Event{Kind: EvAssistant, Backend: "local", Text: text})
 	s.history = append(s.history, oaiMsg{Role: "assistant", Content: text})
+	emit(onEvent, Event{Kind: EvResult, Backend: "local", Text: text})
 	return Reply{Backend: "local", Text: text, SessionID: "local:" + model, Turns: 1, CostUSD: 0}, nil
 }
 

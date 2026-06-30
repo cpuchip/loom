@@ -83,6 +83,10 @@ func (s *claudeSession) ensureStarted(ctx context.Context) error {
 }
 
 func (s *claudeSession) Send(ctx context.Context, prompt string) (Reply, error) {
+	return s.SendStream(ctx, prompt, nil)
+}
+
+func (s *claudeSession) SendStream(ctx context.Context, prompt string, onEvent func(Event)) (Reply, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.ensureStarted(ctx); err != nil {
@@ -94,36 +98,74 @@ func (s *claudeSession) Send(ctx context.Context, prompt string) (Reply, error) 
 	if _, err := fmt.Fprintf(s.stdin, "%s\n", line); err != nil {
 		return Reply{Backend: "claude", Err: err.Error()}, err
 	}
-	// read events until THIS turn's result event
+	// read events until THIS turn's result event, emitting along the way
 	for s.sc.Scan() {
 		var ev map[string]any
 		if json.Unmarshal(s.sc.Bytes(), &ev) != nil {
 			continue // skip any non-JSON noise
 		}
-		if ev["type"] != "result" {
-			continue
+		switch ev["type"] {
+		case "assistant":
+			emitClaudeContent(onEvent, ev)
+		case "user": // tool_result blocks come back as user messages
+			emitClaudeContent(onEvent, ev)
+		case "result":
+			r := Reply{Backend: "claude"}
+			r.Text, _ = ev["result"].(string)
+			r.SessionID, _ = ev["session_id"].(string)
+			if n, ok := ev["num_turns"].(float64); ok {
+				r.Turns = int(n)
+			}
+			if cum, ok := ev["total_cost_usd"].(float64); ok {
+				r.CostUSD = cum - s.lastCost // total_cost_usd is cumulative across turns
+				s.lastCost = cum
+			}
+			if isErr, _ := ev["is_error"].(bool); isErr && r.Err == "" {
+				r.Err = r.Text
+			}
+			s.sessionID = r.SessionID
+			emit(onEvent, Event{Kind: EvResult, Backend: "claude", Text: r.Text})
+			return r, nil
 		}
-		r := Reply{Backend: "claude"}
-		r.Text, _ = ev["result"].(string)
-		r.SessionID, _ = ev["session_id"].(string)
-		if n, ok := ev["num_turns"].(float64); ok {
-			r.Turns = int(n)
-		}
-		if cum, ok := ev["total_cost_usd"].(float64); ok {
-			r.CostUSD = cum - s.lastCost // total_cost_usd is cumulative across turns
-			s.lastCost = cum
-		}
-		if isErr, _ := ev["is_error"].(bool); isErr && r.Err == "" {
-			r.Err = r.Text
-		}
-		s.sessionID = r.SessionID
-		return r, nil
 	}
 	if err := s.sc.Err(); err != nil {
 		return Reply{Backend: "claude", Err: err.Error()}, err
 	}
 	return Reply{Backend: "claude", Err: "stream ended before result"},
 		fmt.Errorf("claude: stream ended before a result event (process exited?)")
+}
+
+// emitClaudeContent walks a claude message event's content blocks → typed events.
+func emitClaudeContent(onEvent func(Event), ev map[string]any) {
+	if onEvent == nil {
+		return
+	}
+	m, _ := ev["message"].(map[string]any)
+	if m == nil {
+		return
+	}
+	blocks, _ := m["content"].([]any) // a string content (our own echo) yields nil → skip
+	for _, b := range blocks {
+		blk, _ := b.(map[string]any)
+		if blk == nil {
+			continue
+		}
+		switch blk["type"] {
+		case "text":
+			if t, _ := blk["text"].(string); t != "" {
+				emit(onEvent, Event{Kind: EvAssistant, Backend: "claude", Text: t})
+			}
+		case "thinking":
+			if t, _ := blk["thinking"].(string); t != "" {
+				emit(onEvent, Event{Kind: EvThinking, Backend: "claude", Text: t})
+			}
+		case "tool_use":
+			name, _ := blk["name"].(string)
+			emit(onEvent, Event{Kind: EvToolCall, Backend: "claude", Tool: name})
+		case "tool_result":
+			emit(onEvent, Event{Kind: EvToolResult, Backend: "claude"})
+		}
+	}
 }
 
 func (s *claudeSession) SessionID() string { return s.sessionID }

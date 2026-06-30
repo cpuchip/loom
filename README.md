@@ -48,10 +48,16 @@ The claude backend's premise is proven on the real path, not assumed:
 go build -o loom.exe ./cmd/loom
 
 loom run   --agent claude "summarize the files in this dir"      # one-shot
+loom run   --agent claude --events "count the .go files"         # + stream tool calls/thinking to stderr
+loom run   --agent local  --model gemma-4-12b "..."              # a free local model on llama-chip's :8090
 loom chat  --agent claude --dir /path/to/repo                    # multi-turn: one msg per stdin line
-loom panel --agents claude,agy "is this function correct?"       # council: fan across agents, compare
+loom panel --agents local,claude "is this function correct?"     # cloud+local council: fan + compare
 loom agents                                                      # list backends
 ```
+
+`--events` makes loom **observable** — the agent's tool calls (`→ Glob`), tool results, and thinking
+stream to stderr as they happen, while the final answer comes back on stdout. Backends emit what they
+can: `claude` the full stream, `local`/`agy` a coarse one.
 
 `--model` overrides the model (e.g. `--model haiku`); `--dir` sets the agent's cwd.
 
@@ -66,13 +72,12 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 
 - ✅ Core `Backend`/`Session` interface · claude backend (persistent stream-json) ·
   **local backend (OpenAI-HTTP → `:8090`; verified single + multi-turn against the live rig; cloud+local `panel` proven)** ·
+  **structured event streaming (`SendStream` + `--events`; verified — claude's tool calls/thinking observable, proven on a real tool-using task)** ·
   agy backend (experimental) · `panel` (concurrent council) · CLI · smoke oracle.
-- **★ Next (recommended, 2026-06-30):** **structured event streaming** (surface tool_call/tool_result, not just the final text — the Hinge-foundational one; turns loom from a black box into an observable harness) → **dogfood loom on a real code review** to surface the next real gap.
+- **★ Next (recommended, 2026-06-30):** **dogfood loom on a real code review** (point it at a real diff/PR with `--events` and let the next real gap surface) → then session resume / a condenser for long reviews / panel routing as the dogfood reveals what's needed.
 - **Backlog:** session resume (`--resume <session_id>` for claude, `--conversation` for agy)
   surfaced in the CLI; a condenser for very long sessions (pattern from OpenHands'
-  `LLMSummarizingCondenser`); structured event streaming (not just the final text);
-  routing/role assignment across the panel; a local backend (llama-chip) so the panel
-  can include a fast local model.
+  `LLMSummarizingCondenser`); routing/role assignment across the panel.
 
 ## ACP — researched 2026-06-29, decision: skip for now
 

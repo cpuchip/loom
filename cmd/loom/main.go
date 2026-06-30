@@ -55,6 +55,7 @@ func cmdRun(args []string) error {
 	agent := fs.String("agent", "claude", "backend (loom agents)")
 	model := fs.String("model", "", "model override")
 	dir := fs.String("dir", "", "working dir")
+	events := fs.Bool("events", false, "stream tool calls + thinking to stderr")
 	_ = fs.Parse(args)
 	prompt := strings.Join(fs.Args(), " ")
 	if prompt == "" {
@@ -69,7 +70,7 @@ func cmdRun(args []string) error {
 		return err
 	}
 	defer sess.Close()
-	r, err := sess.Send(context.Background(), prompt)
+	r, err := sendTurn(sess, prompt, *events)
 	if err != nil {
 		return err
 	}
@@ -86,6 +87,7 @@ func cmdChat(args []string) error {
 	agent := fs.String("agent", "claude", "backend (loom agents)")
 	model := fs.String("model", "", "model override")
 	dir := fs.String("dir", "", "working dir")
+	events := fs.Bool("events", false, "stream tool calls + thinking to stderr")
 	_ = fs.Parse(args)
 	b, err := pickBackend(*agent)
 	if err != nil {
@@ -104,7 +106,7 @@ func cmdChat(args []string) error {
 		if line == "" {
 			continue
 		}
-		r, err := sess.Send(context.Background(), line)
+		r, err := sendTurn(sess, line, *events)
 		if err != nil {
 			return err
 		}
@@ -151,6 +153,37 @@ func cmdPanel(args []string) error {
 		}
 	}
 	return nil
+}
+
+// sendTurn runs one turn, optionally streaming the agent's tool calls + thinking
+// to stderr (the work) while the final answer is returned in the Reply.
+func sendTurn(sess loom.Session, prompt string, showEvents bool) (loom.Reply, error) {
+	if showEvents {
+		return sess.SendStream(context.Background(), prompt, eventPrinter())
+	}
+	return sess.Send(context.Background(), prompt)
+}
+
+func eventPrinter() func(loom.Event) {
+	return func(ev loom.Event) {
+		switch ev.Kind {
+		case loom.EvToolCall:
+			fmt.Fprintf(os.Stderr, "  → %s\n", ev.Tool)
+		case loom.EvToolResult:
+			fmt.Fprintln(os.Stderr, "  ← (tool result)")
+		case loom.EvThinking:
+			fmt.Fprintf(os.Stderr, "  · %s\n", oneLine(ev.Text, 100))
+			// EvAssistant + EvResult are carried by the returned Reply
+		}
+	}
+}
+
+func oneLine(s string, n int) string {
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", "")
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
 
 func usage() {
