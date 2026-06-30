@@ -1,0 +1,9 @@
+# build artifacts
+/loom
+/loom.exe
+*.exe
+*.test
+
+# scratch
+/tmp/
+*.log
