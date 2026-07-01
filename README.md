@@ -203,6 +203,9 @@ instructions + the pg-ai-stewards MCP config; mount the repo as `--dir`; run `--
 store loom's `session_id` on the work-item so a later dispatch resumes by re-mounting the same home. That is
 loom as the substrate's hands: reach (dir), voice back (MCP hinge), wall (isolate), memory (resume).
 
+**Full integration guide** — a copy-in contract for a backend driving loom (subprocess model, the two walls,
+the canonical dispatch, prereqs, council note): [`docs/pg-ai-stewards-integration.md`](docs/pg-ai-stewards-integration.md).
+
 ### Test
 
 ```sh
@@ -210,7 +213,7 @@ go test ./...                 # pure unit tests (parsing, registry) — no money
 LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a little)
 ```
 
-## Status / roadmap (v0.1)
+## Status / roadmap (v0.4)
 
 - ✅ Core `Backend`/`Session` interface · claude backend (persistent stream-json) ·
   **local backend (OpenAI-HTTP → `:8090`; verified single + multi-turn against the live rig; cloud+local `panel` proven)** ·
