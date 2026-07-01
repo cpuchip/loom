@@ -54,6 +54,7 @@ loom chat  --agent claude --dir /path/to/repo                    # multi-turn: o
 loom panel  --agents local,claude "is this function correct?"    # cloud+local council: fan + compare
 loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   # review a git diff or files
 loom run    --agent claude --isolate --dir /path/to/repo "..."   # claude in a docker sandbox (host walled off)
+loom run    --agent claude --remote cpuchip@box --dir /repo "..." # claude on another machine over ssh
 loom agents                                                      # list backends
 ```
 
@@ -88,6 +89,29 @@ has network, so it isn't *zero-trust* — a tighter version would use a scoped/s
 limits. But the **host filesystem is walled**.) `agy --isolate` is not yet wired (its Antigravity auth is
 gnarlier). This is the presiding covenant made literal — delegation needs a lawful wall (D&C 121).
 
+## Remote (`--remote`)
+
+The third point on the trust axis: run the agent on **another machine** over ssh — the same
+transport-wrapping pattern as `--isolate`. stream-json flows over the ssh pipe unchanged. This is how a
+backend (pg-ai-stewards) commands a Claude Code session on a remote box — the substrate's reach, at distance.
+
+```sh
+loom run --agent claude --remote cpuchip@workchip --dir /home/cpuchip/repo "review this repo"
+```
+
+The whole trust axis is one transport tree in the claude backend (`claudeCmd`):
+
+```
+direct            claude …                                  (full host access)
+--isolate         docker run -i … loom-claude claude …      (host walled)
+--remote H        ssh -T H  cd <dir> && claude …            (another machine)
+(remote+isolate — docker on the remote — is a v2)
+```
+
+Requirements: the remote box has **`claude` installed + authed** (it uses its *own* `~/.claude`), and your
+ssh key reaches it. Verify with your own agent-loaded shell (`! loom run --remote …`) — a passphrase-locked
+key with no agent can't authenticate from an automated context.
+
 `--model` overrides the model (e.g. `--model haiku`); `--dir` sets the agent's cwd.
 
 ### Test
@@ -106,7 +130,8 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 - ✅ **Dogfooded:** loom reviewed its own code and found+fixed real bugs (history-poisoning, a `SessionID` data race, the orphan-`</think>` CoT-strip gap).
 - ✅ **Isolation (`--isolate`):** claude in a docker sandbox (`loom-claude`), host walled to `/work` + read-only creds — verified.
 - **North star:** loom = the substrate's *agent fabric* — a uniform, **walled** way to summon intelligence; its soul is running agentic harnesses (Claude Code, agy) the substrate can't run itself, safely. Axes: agency (raw model ↔ agent) × trust (local ↔ sandboxed ↔ remote).
-- **★ Next:** `agy --isolate`; tighter sandbox (scoped token / egress limits); **remote** claude sessions (the substrate manages claude on another box); panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
+- ✅ **Remote (`--remote`):** ssh transport built + unit-tested — the **trust axis is complete** (direct / `--isolate` / `--remote`). Live-verify pending a claude-authed remote box + agent-loaded ssh (run via `!` in your own shell).
+- **★ Next:** tighter sandbox (scoped/short-lived token, egress limits); `remote+isolate` (docker on the remote); `agy --isolate`; panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
 - **Backlog:** session resume (`--resume <session_id>` for claude, `--conversation` for agy)
   surfaced in the CLI; a condenser for very long sessions (pattern from OpenHands'
   `LLMSummarizingCondenser`); routing/role assignment across the panel.

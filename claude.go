@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -61,15 +62,7 @@ func (s *claudeSession) ensureStarted(ctx context.Context) error {
 	if s.opts.Model != "" {
 		args = append(args, "--model", s.opts.Model)
 	}
-	var cmd *exec.Cmd
-	if s.opts.Isolate {
-		cmd = dockerClaudeCmd(ctx, args, s.opts) // sandboxed: agent sees only /work + creds
-	} else {
-		cmd = exec.CommandContext(ctx, s.bin, args...)
-		if s.opts.Workdir != "" {
-			cmd.Dir = s.opts.Workdir
-		}
-	}
+	cmd := claudeCmd(ctx, s.bin, s.opts, args)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -174,11 +167,38 @@ func emitClaudeContent(onEvent func(Event), ev map[string]any) {
 	}
 }
 
-// dockerClaudeCmd wraps the claude invocation in `docker run` so the agent is
-// sandboxed: it sees only the workdir (bind-mounted at /work) and the subscription
-// auth (~/.claude, read-only) — never the rest of the host. stream-json passes
-// through `-i`, so the session protocol is unchanged.
-func dockerClaudeCmd(ctx context.Context, claudeArgs []string, opts SessionOpts) *exec.Cmd {
+// claudeCmd builds the transport chain for a claude invocation — the trust axis:
+//
+//	direct   → claude …                            (cwd = Workdir; full host access)
+//	isolate  → docker run -i … loom-claude claude … (sandboxed: only /work + creds)
+//	remote   → ssh -T <host> [cd <dir> &&] claude … (the REMOTE box's own claude + auth)
+//
+// stream-json flows over each transport's stdin/stdout unchanged. (remote+isolate —
+// docker on the remote with remote paths/creds — is a v2; remote wins here.)
+func claudeCmd(ctx context.Context, bin string, opts SessionOpts, claudeArgs []string) *exec.Cmd {
+	if opts.Remote != "" {
+		remote := strings.Join(append([]string{bin}, claudeArgs...), " ")
+		if opts.Workdir != "" {
+			remote = "cd " + opts.Workdir + " && " + remote
+		}
+		return exec.CommandContext(ctx, "ssh", "-T", opts.Remote, remote)
+	}
+	if opts.Isolate {
+		a := dockerRunArgs(opts, claudeArgs)
+		return exec.CommandContext(ctx, a[0], a[1:]...)
+	}
+	cmd := exec.CommandContext(ctx, bin, claudeArgs...)
+	if opts.Workdir != "" {
+		cmd.Dir = opts.Workdir
+	}
+	return cmd
+}
+
+// dockerRunArgs builds `docker run -i … loom-claude claude <args>` so the agent is
+// sandboxed: it sees only the workdir (bind-mounted /work) and the credentials file
+// (read-only) — never the host. claude writes its own state to an ephemeral
+// in-container ~/.claude (gone on --rm).
+func dockerRunArgs(opts SessionOpts, claudeArgs []string) []string {
 	wd := opts.Workdir
 	if wd == "" {
 		wd, _ = os.Getwd()
@@ -188,18 +208,13 @@ func dockerClaudeCmd(ctx context.Context, claudeArgs []string, opts SessionOpts)
 	if image == "" {
 		image = "loom-claude"
 	}
-	dockerArgs := []string{
-		"run", "-i", "--rm",
-		"-v", dockerVol(wd) + ":/work",
-		"-w", "/work",
-		// only the credentials file is mounted (read-only) — claude needs to WRITE
-		// its session/todo/log state into /root/.claude, so the rest stays ephemeral
-		// in-container (gone on --rm).
+	a := []string{
+		"docker", "run", "-i", "--rm",
+		"-v", dockerVol(wd) + ":/work", "-w", "/work",
 		"-v", dockerVol(filepath.Join(home, ".claude", ".credentials.json")) + ":/root/.claude/.credentials.json:ro",
 		image, "claude",
 	}
-	dockerArgs = append(dockerArgs, claudeArgs...)
-	return exec.CommandContext(ctx, "docker", dockerArgs...)
+	return append(a, claudeArgs...)
 }
 
 // dockerVol normalizes a host path for a Docker bind mount (C:\path → C:/path,

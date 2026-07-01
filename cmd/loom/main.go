@@ -61,6 +61,7 @@ func cmdRun(args []string) error {
 	dir := fs.String("dir", "", "working dir")
 	events := fs.Bool("events", false, "stream tool calls + thinking to stderr")
 	isolate := fs.Bool("isolate", false, "run claude in a docker sandbox (host walled off)")
+	remote := fs.String("remote", "", "run claude on a remote box over ssh (e.g. cpuchip@host)")
 	_ = fs.Parse(args)
 	prompt := strings.Join(fs.Args(), " ")
 	if prompt == "" {
@@ -70,7 +71,7 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	sess, err := b.Open(context.Background(), loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate})
+	sess, err := b.Open(context.Background(), loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate, Remote: *remote})
 	if err != nil {
 		return err
 	}
@@ -94,12 +95,13 @@ func cmdChat(args []string) error {
 	dir := fs.String("dir", "", "working dir")
 	events := fs.Bool("events", false, "stream tool calls + thinking to stderr")
 	isolate := fs.Bool("isolate", false, "run claude in a docker sandbox (host walled off)")
+	remote := fs.String("remote", "", "run claude on a remote box over ssh (e.g. cpuchip@host)")
 	_ = fs.Parse(args)
 	b, err := pickBackend(*agent)
 	if err != nil {
 		return err
 	}
-	sess, err := b.Open(context.Background(), loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate})
+	sess, err := b.Open(context.Background(), loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate, Remote: *remote})
 	if err != nil {
 		return err
 	}
@@ -131,6 +133,7 @@ func cmdPanel(args []string) error {
 	dir := fs.String("dir", "", "working dir")
 	model := fs.String("model", "", "model override")
 	isolate := fs.Bool("isolate", false, "run claude in a docker sandbox (host walled off)")
+	remote := fs.String("remote", "", "run claude on a remote box over ssh (e.g. cpuchip@host)")
 	_ = fs.Parse(args)
 	prompt := strings.Join(fs.Args(), " ")
 	if prompt == "" {
@@ -147,7 +150,7 @@ func cmdPanel(args []string) error {
 		}
 		backends = append(backends, b)
 	}
-	replies := loom.Panel(context.Background(), backends, loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate}, prompt)
+	replies := loom.Panel(context.Background(), backends, loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate, Remote: *remote}, prompt)
 	for _, r := range replies {
 		fmt.Printf("\n=== %s ===\n", r.Backend)
 		if r.Err != "" {
@@ -172,6 +175,7 @@ func cmdReview(args []string) error {
 	maxChars := fs.Int("max", 40000, "cap on review content chars")
 	events := fs.Bool("events", false, "stream tool calls/thinking to stderr")
 	isolate := fs.Bool("isolate", false, "run claude in a docker sandbox (host walled off)")
+	remote := fs.String("remote", "", "run claude on a remote box over ssh (e.g. cpuchip@host)")
 	_ = fs.Parse(args)
 
 	content, label, err := gatherReview(*dir, *diff, fs.Args(), *maxChars)
@@ -182,7 +186,7 @@ func cmdReview(args []string) error {
 		return fmt.Errorf("review: nothing to review (no files given, and the diff is empty)")
 	}
 	prompt := reviewPrompt(label, content)
-	opts := loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate}
+	opts := loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate, Remote: *remote}
 
 	backends, err := backendsFromList(*agents)
 	if err != nil {

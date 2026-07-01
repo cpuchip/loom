@@ -23,6 +23,7 @@ type SessionOpts struct {
 	Model   string // backend-specific model override ("" = default)
 	Isolate bool   // run the agent in a docker sandbox (claude backend) — walls the host
 	Image   string // docker image for isolation ("" = loom-claude)
+	Remote  string // run the agent on a remote box over ssh (e.g. "cpuchip@host"); "" = local
 }
 
 // Backend is a driveable agent CLI.

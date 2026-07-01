@@ -56,6 +56,33 @@ func TestStripThink(t *testing.T) {
 	}
 }
 
+// TestClaudeCmd locks the transport tree (direct / isolate / remote) — the command
+// construction, verifiable without touching docker or ssh.
+func TestClaudeCmd(t *testing.T) {
+	ctx := context.Background()
+	args := []string{"-p", "--input-format", "stream-json"}
+
+	// direct: claude … with cwd = Workdir
+	c := claudeCmd(ctx, "claude", SessionOpts{Workdir: "/repo"}, args)
+	if c.Args[0] != "claude" || c.Dir != "/repo" {
+		t.Errorf("direct: args0=%q dir=%q", c.Args[0], c.Dir)
+	}
+
+	// isolate: docker run … loom-claude claude … (Windows path → forward slashes)
+	c = claudeCmd(ctx, "claude", SessionOpts{Isolate: true, Workdir: `C:\repo`}, args)
+	j := strings.Join(c.Args, " ")
+	if c.Args[0] != "docker" || !strings.Contains(j, "loom-claude") || !strings.Contains(j, "C:/repo:/work") {
+		t.Errorf("isolate: %v", c.Args)
+	}
+
+	// remote: ssh -T host "cd <dir> && claude …"
+	c = claudeCmd(ctx, "claude", SessionOpts{Remote: "cpuchip@box", Workdir: "/r"}, args)
+	j = strings.Join(c.Args, " ")
+	if c.Args[0] != "ssh" || !strings.Contains(j, "-T cpuchip@box") || !strings.Contains(j, "cd /r && claude -p") {
+		t.Errorf("remote: %v", c.Args)
+	}
+}
+
 func TestBackendsRegistry(t *testing.T) {
 	bs := Backends()
 	if _, ok := bs["claude"]; !ok {
