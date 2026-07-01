@@ -99,6 +99,10 @@ backend (pg-ai-stewards) commands a Claude Code session on a remote box — the 
 loom run --agent claude --remote cpuchip@workchip --dir /home/cpuchip/repo "review this repo"
 ```
 
+**Verified 2026-06-30:** a Windows `loom.exe` → `ssh cpuchip@<box>` → a Claude Code agent listing/summarizing a
+repo on the remote Ubuntu machine, its `→ Bash` tool-events streaming back live (~$0.12/turn). The pipe worked
+first try; the far-side PATH (below) was the only catch.
+
 The whole trust axis is one transport tree in the claude backend (`claudeCmd`):
 
 ```
@@ -133,7 +137,7 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 - ✅ **Dogfooded:** loom reviewed its own code and found+fixed real bugs (history-poisoning, a `SessionID` data race, the orphan-`</think>` CoT-strip gap).
 - ✅ **Isolation (`--isolate`):** claude in a docker sandbox (`loom-claude`), host walled to `/work` + read-only creds — verified.
 - **North star:** loom = the substrate's *agent fabric* — a uniform, **walled** way to summon intelligence; its soul is running agentic harnesses (Claude Code, agy) the substrate can't run itself, safely. Axes: agency (raw model ↔ agent) × trust (local ↔ sandboxed ↔ remote).
-- ✅ **Remote (`--remote`):** ssh transport built + unit-tested — the **trust axis is complete** (direct / `--isolate` / `--remote`). Live-verify pending a claude-authed remote box + agent-loaded ssh (run via `!` in your own shell).
+- ✅ **Remote (`--remote`):** ssh transport **live-verified end-to-end** (2026-06-30) — a Windows `loom.exe` drove a Claude Code agent on a remote Ubuntu box, its `→ Bash` tool-events streaming back, ~$0.12/turn. The **trust axis is complete** on the real path (direct / `--isolate` / `--remote`).
 - **★ Next:** tighter sandbox (scoped/short-lived token, egress limits); `remote+isolate` (docker on the remote); `agy --isolate`; panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
 - **Backlog:** session resume (`--resume <session_id>` for claude, `--conversation` for agy)
   surfaced in the CLI; a condenser for very long sessions (pattern from OpenHands'
