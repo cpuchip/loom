@@ -84,6 +84,20 @@ func TestClaudeCmd(t *testing.T) {
 		!strings.Contains(j, "bash -lc") || !strings.Contains(j, "cd /r && claude -p") {
 		t.Errorf("remote: %v", c.Args)
 	}
+
+	// remote+isolate: ssh → docker on the REMOTE, paths resolved there ($HOME, remote --dir)
+	c = claudeCmd(ctx, "claude", SessionOpts{Remote: "cpuchip@box", Isolate: true, Workdir: "/r"}, args)
+	j = strings.Join(c.Args, " ")
+	if c.Args[0] != "ssh" || !strings.Contains(j, "bash -lc") || !strings.Contains(j, "docker run") ||
+		!strings.Contains(j, "loom-claude") || !strings.Contains(j, "/r:/work") ||
+		!strings.Contains(j, "$HOME/.claude/.credentials.json") {
+		t.Errorf("remote+isolate: %v", c.Args)
+	}
+	// remote+isolate without --dir falls back to the remote $HOME
+	c = claudeCmd(ctx, "claude", SessionOpts{Remote: "cpuchip@box", Isolate: true}, args)
+	if !strings.Contains(strings.Join(c.Args, " "), "$HOME:/work") {
+		t.Errorf("remote+isolate no --dir should mount $HOME: %v", c.Args)
+	}
 }
 
 // TestClaudeArgs locks the persistent-session flags and the --resume wiring.

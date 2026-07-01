@@ -233,21 +233,30 @@ func claudeArgs(opts SessionOpts) []string {
 
 // claudeCmd builds the transport chain for a claude invocation — the trust axis:
 //
-//	direct   → claude …                            (cwd = Workdir; full host access)
-//	isolate  → docker run -i … loom-claude claude … (sandboxed: only /work + creds)
-//	remote   → ssh -T <host> [cd <dir> &&] claude … (the REMOTE box's own claude + auth)
+//	direct          → claude …                                  (cwd = Workdir; full host access)
+//	isolate         → docker run -i … loom-claude claude …      (sandboxed: only /work + creds)
+//	remote          → ssh -T <host> bash -lc 'cd <dir> && claude …'          (the REMOTE box's own claude)
+//	remote+isolate  → ssh -T <host> bash -lc 'docker run -i … loom-claude claude …'  (sandboxed ON the remote)
 //
-// stream-json flows over each transport's stdin/stdout unchanged. (remote+isolate —
-// docker on the remote with remote paths/creds — is a v2; remote wins here.)
+// stream-json flows over each transport's stdin/stdout unchanged — even chained
+// through ssh then docker. remote+isolate resolves docker paths on the remote ($HOME).
 func claudeCmd(ctx context.Context, bin string, opts SessionOpts, claudeArgs []string) *exec.Cmd {
 	if opts.Remote != "" {
-		inner := strings.Join(append([]string{bin}, claudeArgs...), " ")
-		if opts.Workdir != "" {
-			inner = "cd " + opts.Workdir + " && " + inner
+		var inner string
+		if opts.Isolate {
+			// remote + isolate: a sandboxed claude ON the remote box. The docker
+			// command runs over there, so its volume paths must resolve on the REMOTE
+			// ($HOME expanded by the remote login shell; --dir is a remote path).
+			inner = strings.Join(remoteDockerArgs(opts, claudeArgs), " ")
+		} else {
+			inner = strings.Join(append([]string{bin}, claudeArgs...), " ")
+			if opts.Workdir != "" {
+				inner = "cd " + opts.Workdir + " && " + inner
+			}
 		}
 		// run inside a LOGIN shell so the remote's full PATH loads — a plain
 		// `ssh host cmd` uses a non-interactive shell that misses nvm / npm-global
-		// installs, so `claude` reads as "command not found".
+		// installs, so `claude`/`docker` read as "command not found".
 		return exec.CommandContext(ctx, "ssh", "-T", opts.Remote, "bash", "-lc", shellQuote(inner))
 	}
 	if opts.Isolate {
@@ -261,27 +270,47 @@ func claudeCmd(ctx context.Context, bin string, opts SessionOpts, claudeArgs []s
 	return cmd
 }
 
-// dockerRunArgs builds `docker run -i … loom-claude claude <args>` so the agent is
+// dockerArgs builds `docker run -i … <image> claude <args>` so the agent is
 // sandboxed: it sees only the workdir (bind-mounted /work) and the credentials file
 // (read-only) — never the host. claude writes its own state to an ephemeral
-// in-container ~/.claude (gone on --rm).
+// in-container ~/.claude (gone on --rm). wd/creds are already in the target
+// platform's path form (local: forward-slashed host paths; remote: $HOME-relative).
+func dockerArgs(wd, creds, image string, claudeArgs []string) []string {
+	if image == "" {
+		image = "loom-claude"
+	}
+	a := []string{
+		"docker", "run", "-i", "--rm",
+		"-v", wd + ":/work", "-w", "/work",
+		"-v", creds + ":/root/.claude/.credentials.json:ro",
+		image, "claude",
+	}
+	return append(a, claudeArgs...)
+}
+
+// dockerRunArgs sandboxes claude on the LOCAL machine — host paths, forward-slashed
+// for Docker Desktop on Windows.
 func dockerRunArgs(opts SessionOpts, claudeArgs []string) []string {
 	wd := opts.Workdir
 	if wd == "" {
 		wd, _ = os.Getwd()
 	}
 	home, _ := os.UserHomeDir()
-	image := opts.Image
-	if image == "" {
-		image = "loom-claude"
+	creds := filepath.Join(home, ".claude", ".credentials.json")
+	return dockerArgs(dockerVol(wd), dockerVol(creds), opts.Image, claudeArgs)
+}
+
+// remoteDockerArgs sandboxes claude on the REMOTE box (for --remote --isolate). The
+// docker command runs over ssh inside a login shell, so paths resolve THERE: $HOME
+// is expanded by the remote bash, and --dir is a remote path. The remote must have
+// docker, the loom-claude image, and an authed ~/.claude/.credentials.json. Pass
+// --dir to scope the sandbox; without it, it falls back to the remote $HOME.
+func remoteDockerArgs(opts SessionOpts, claudeArgs []string) []string {
+	wd := opts.Workdir
+	if wd == "" {
+		wd = "$HOME"
 	}
-	a := []string{
-		"docker", "run", "-i", "--rm",
-		"-v", dockerVol(wd) + ":/work", "-w", "/work",
-		"-v", dockerVol(filepath.Join(home, ".claude", ".credentials.json")) + ":/root/.claude/.credentials.json:ro",
-		image, "claude",
-	}
-	return append(a, claudeArgs...)
+	return dockerArgs(wd, "$HOME/.claude/.credentials.json", opts.Image, claudeArgs)
 }
 
 // dockerVol normalizes a host path for a Docker bind mount (C:\path → C:/path,

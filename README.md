@@ -55,6 +55,7 @@ loom panel  --agents local,claude "is this function correct?"    # cloud+local c
 loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   # review a git diff or files
 loom run    --agent claude --isolate --dir /path/to/repo "..."   # claude in a docker sandbox (host walled off)
 loom run    --agent claude --remote cpuchip@box --dir /repo "..." # claude on another machine over ssh
+loom run    --agent claude --remote cpuchip@box --isolate --dir /repo "..." # sandboxed claude ON the remote box
 loom run    --agent claude --resume <session-id> "..."           # reattach to a prior session (survives process/pipe death)
 loom agents                                                      # list backends
 ```
@@ -145,18 +146,24 @@ first try; the far-side PATH (below) was the only catch.
 The whole trust axis is one transport tree in the claude backend (`claudeCmd`):
 
 ```
-direct            claude …                                  (full host access)
---isolate         docker run -i … loom-claude claude …      (host walled)
---remote H        ssh -T H  bash -lc 'cd <dir> && claude …'  (another machine)
-(remote+isolate — docker on the remote — is a v2)
+direct                claude …                                                     (full host access)
+--isolate             docker run -i … loom-claude claude …                          (host walled)
+--remote H            ssh -T H bash -lc 'cd <dir> && claude …'                       (another machine)
+--remote H --isolate  ssh -T H bash -lc 'docker run -i … loom-claude claude …'       (sandboxed ON the remote)
 ```
+
+**`--remote --isolate`** composes the two: a sandboxed claude *on* the remote box — the exact shape "manage
+remote claude sessions *safely*" wants (reach + wall). The docker command runs over ssh, so its volume paths
+resolve **on the remote** (`$HOME` expanded there, `--dir` is a remote path). Pass `--dir` to scope the
+sandbox; without it, it falls back to the remote `$HOME`.
 
 Requirements: the remote box has **`claude` installed + authed** (it uses its *own* `~/.claude`), and your
 ssh key reaches it. loom runs the remote command in a **login shell** (`bash -lc`) so the box's full PATH
 loads — a plain non-interactive `ssh host "claude …"` uses a shell that misses nvm / npm-global / `~/.local/bin`
 installs and dies with `claude: command not found` *even when claude works fine in your interactive ssh session
-there* (a real gotcha, hit + fixed 2026-06-30). Verify from your own agent-loaded shell — a passphrase-locked
-key with no agent can't authenticate from an automated context.
+there* (a real gotcha, hit + fixed 2026-06-30). For `--remote --isolate`, the remote also needs **docker + the
+`loom-claude` image** (build it there: `docker build -t loom-claude -f docker/Dockerfile.claude .`). Verify from
+your own agent-loaded shell — a passphrase-locked key with no agent can't authenticate from an automated context.
 
 `--model` overrides the model (e.g. `--model haiku`); `--dir` sets the agent's cwd.
 
@@ -179,7 +186,8 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 - ✅ **Remote (`--remote`):** ssh transport **live-verified end-to-end** (2026-06-30) — a Windows `loom.exe` drove a Claude Code agent on a remote Ubuntu box, its `→ Bash` tool-events streaming back, ~$0.12/turn. The **trust axis is complete** on the real path (direct / `--isolate` / `--remote`).
 - ✅ **Resume (`--resume <id>`):** durable sessions — reattach to a prior session across a process restart / dropped pipe (context restored from claude's on-disk session store). Verified 2026-06-30 by a two-process oracle + CLI e2e. The piece that makes a **remote** session survive a broken pipe.
 - ✅ **Interrupt + steer (`Interrupt()` / Ctrl-C):** stop a turn in flight and redirect on the live session (stream-json `control_request` interrupt; probe-verified wire format). Live oracle + `-race` on the concurrent path. **Completes the session-lifecycle triad** (carry / resume / interrupt+steer).
-- **★ Next:** `remote+isolate` (sandboxed claude on a remote box — reach + wall composed); tighter sandbox (scoped/short-lived token, egress limits); `agy --isolate`; panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
+- ✅ **`remote + isolate`:** sandboxed claude *on* the remote box (ssh → docker-on-remote, volume paths resolved there via `$HOME`). Built + unit-tested (the composed argv); live-verify pending the `loom-claude` image built on the remote. Reach + wall composed — "manage remote sessions *safely*."
+- **★ Next:** tighter sandbox (scoped/short-lived token, egress limits — toward zero-trust); `agy --isolate`; panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
 - **Backlog:** `--session-id`/`--fork-session` (pre-assign / branch) surfaced in the CLI; agy `--conversation` resume in the CLI; a condenser for very long sessions (pattern from OpenHands' `LLMSummarizingCondenser`); routing/role assignment across the panel.
 
 ## ACP — researched 2026-06-29, decision: skip for now
