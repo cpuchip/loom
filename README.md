@@ -57,6 +57,7 @@ loom run    --agent claude --isolate --dir /path/to/repo "..."   # claude in a d
 loom run    --agent claude --remote cpuchip@box --dir /repo "..." # claude on another machine over ssh
 loom run    --agent claude --remote cpuchip@box --isolate --dir /repo "..." # sandboxed claude ON the remote box
 loom run    --agent claude --resume <session-id> "..."           # reattach to a prior session (survives process/pipe death)
+loom run    --agent claude --json "..."                          # emit the Reply as one JSON line on stdout (subprocess callers)
 loom agents                                                      # list backends
 ```
 
@@ -227,6 +228,7 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 - ✅ **Interrupt + steer (`Interrupt()` / Ctrl-C):** stop a turn in flight and redirect on the live session (stream-json `control_request` interrupt; probe-verified wire format). Live oracle + `-race` on the concurrent path. **Completes the session-lifecycle triad** (carry / resume / interrupt+steer).
 - ✅ **`remote + isolate`:** sandboxed claude *on* the remote box (ssh → docker-on-remote, volume paths resolved there via `$HOME`). Built + unit-tested (the composed argv); live-verify pending the `loom-claude` image built on the remote. Reach + wall composed — "manage remote sessions *safely*."
 - ✅ **The substrate hinge (config surface):** `--mcp-config` (wire the substrate MCP into the agent — reads/writes back), `--allowed-tools` (capability wall), `--skip-permissions` (headless, safe in `--isolate`), `--system-prompt-file` (instructions), and `--claude-home` (the container's `~/.claude`: skills/instructions/settings + **persisted sessions → resume+isolate now works**, live-verified). loom can now drive claude as a *configured* substrate worker, not just a chat.
+- ✅ **`--json` output + integration guide:** `--json` emits the `Reply` as one stdout line (the clean "pull" channel for subprocess callers; events stay on stderr). Full contract in [`docs/pg-ai-stewards-integration.md`](docs/pg-ai-stewards-integration.md) — subprocess model, the two walls, exfil channels (bind-mount / MCP / git / stdout), push-vs-pull data flow, the canonical dispatch.
 - **★ Next:** the first real `pg-ai-stewards → loom run --isolate --mcp-config …` dispatch (the viability test); tighter sandbox (scoped/short-lived token, egress limits — toward zero-trust); `agy --isolate`; panel role-routing (doer→critic).
 - **Backlog:** `--session-id`/`--fork-session` (pre-assign / branch) surfaced in the CLI; agy `--conversation` resume in the CLI; a condenser for very long sessions (pattern from OpenHands' `LLMSummarizingCondenser`); routing/role assignment across the panel.
 

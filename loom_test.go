@@ -148,6 +148,24 @@ func TestBackendsRegistry(t *testing.T) {
 	}
 }
 
+// TestReplyJSON locks the --json output contract the substrate parses (the "pull"
+// channel): stable keys, and omitempty error absent on success.
+func TestReplyJSON(t *testing.T) {
+	b, err := json.Marshal(Reply{Backend: "claude", Text: "hi", SessionID: "abc", CostUSD: 0.01, Turns: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, want := range []string{`"backend":"claude"`, `"text":"hi"`, `"session_id":"abc"`, `"cost_usd":0.01`, `"turns":2`} {
+		if !strings.Contains(s, want) {
+			t.Errorf("Reply JSON missing %q: %s", want, s)
+		}
+	}
+	if strings.Contains(s, "error") {
+		t.Errorf("empty Err should be omitted (omitempty): %s", s)
+	}
+}
+
 // TestClaudeMultiTurnSmoke drives the REAL claude binary — it spends a little
 // money, so it is opt-in via LOOM_SMOKE=1. It is the loom oracle: proves the
 // persistent stream-json session holds context across turns (the reason loom

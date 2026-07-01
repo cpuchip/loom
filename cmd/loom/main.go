@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -14,6 +15,23 @@ import (
 
 	"github.com/cpuchip/loom"
 )
+
+// emitReply writes one turn's result: as a single JSON line to stdout when jsonOut
+// (for programmatic/subprocess callers — the "pull" channel), else the answer on
+// stdout with cost/error meta on stderr. Session-resume hints are left to the caller.
+func emitReply(r loom.Reply, jsonOut bool) error {
+	if jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(r)
+	}
+	fmt.Println(r.Text)
+	if r.Err != "" {
+		fmt.Fprintf(os.Stderr, "[%s: %s]\n", r.Backend, r.Err)
+	}
+	if r.CostUSD > 0 {
+		fmt.Fprintf(os.Stderr, "[%s $%.4f]\n", r.Backend, r.CostUSD)
+	}
+	return nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -57,10 +75,10 @@ func pickBackend(name string) (loom.Backend, error) {
 // sessFlags is the shared flag set for the session commands (run, chat) — the
 // backend selector plus the whole claude-configuration surface.
 type sessFlags struct {
-	agent, model, dir, remote, resume            *string
-	mcpConfig, allowedTools, permMode            *string
-	sysPromptFile, claudeHome                    *string
-	events, isolate, skipPerms                   *bool
+	agent, model, dir, remote, resume *string
+	mcpConfig, allowedTools, permMode *string
+	sysPromptFile, claudeHome         *string
+	events, isolate, skipPerms, json  *bool
 }
 
 func addSessionFlags(fs *flag.FlagSet) *sessFlags {
@@ -78,6 +96,7 @@ func addSessionFlags(fs *flag.FlagSet) *sessFlags {
 		skipPerms:     fs.Bool("skip-permissions", false, "claude --dangerously-skip-permissions (headless; safe only INSIDE --isolate)"),
 		sysPromptFile: fs.String("system-prompt-file", "", "claude --append-system-prompt-file: inject instructions"),
 		claudeHome:    fs.String("claude-home", "", "(--isolate) host dir mounted as the container's ~/.claude: skills/instructions/settings/MCP + PERSISTED sessions (enables resume+isolate)"),
+		json:          fs.Bool("json", false, "emit the Reply as JSON to stdout (for programmatic/subprocess callers)"),
 	}
 }
 
@@ -111,14 +130,10 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println(r.Text)
-	if r.Err != "" {
-		fmt.Fprintf(os.Stderr, "[%s: %s]\n", r.Backend, r.Err)
+	if err := emitReply(r, *sf.json); err != nil {
+		return err
 	}
-	if r.CostUSD > 0 {
-		fmt.Fprintf(os.Stderr, "[%s $%.4f]\n", r.Backend, r.CostUSD)
-	}
-	if r.SessionID != "" {
+	if !*sf.json && r.SessionID != "" {
 		fmt.Fprintf(os.Stderr, "[session %s — resume: loom run --resume %s ...]\n", r.SessionID, r.SessionID)
 	}
 	return nil
@@ -150,15 +165,11 @@ func cmdChat(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println(r.Text)
-		if r.Err != "" {
-			fmt.Fprintf(os.Stderr, "[%s: %s]\n", r.Backend, r.Err)
-		}
-		if r.CostUSD > 0 {
-			fmt.Fprintf(os.Stderr, "[%s $%.4f this turn]\n", r.Backend, r.CostUSD)
+		if err := emitReply(r, *sf.json); err != nil {
+			return err
 		}
 	}
-	if id := sess.SessionID(); id != "" {
+	if id := sess.SessionID(); !*sf.json && id != "" {
 		fmt.Fprintf(os.Stderr, "[session %s — resume: loom chat --resume %s]\n", id, id)
 	}
 	return in.Err()

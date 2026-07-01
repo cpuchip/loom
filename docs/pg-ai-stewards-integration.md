@@ -39,7 +39,7 @@ This is the presiding covenant made operational: you hand the agent exactly the 
 For autonomous dispatch, **always `--isolate`** — the container is the wall that makes
 `--skip-permissions` (headless, no prompts) safe.
 
-## 3. Giving claude the code
+## 3. Giving claude the code — and getting work back out
 
 ```
 --dir <path>      # the agent's cwd = the repo/corpus it works, via its own tools
@@ -54,6 +54,32 @@ Three placements, matching the trust axis:
 
 The substrate provisions the clone (its existing clone step), then points loom at it. (A `--clone
 <git-url>` convenience could move that into loom later; not needed to start.)
+
+**Getting work back out — the wall runs both ways.** Work leaves the container *only* through a channel you
+opened. Four exist:
+
+1. **Bind-mounted `/work`** — a bind mount is *bidirectional*, so anything claude writes under `/work` is on
+   the host clone immediately (same inode). The main channel for code work: the diff / new files are just
+   *there* on the host when the dispatch returns — no copy-out step.
+2. **The MCP hinge** (§4) — claude calls `mcp__pg-ai-stewards__*` to write results into the substrate directly.
+3. **git push** — claude commits in `/work` and pushes a branch (needs git creds + egress); the substrate pulls it.
+4. **stdout** — the final answer text (the `Reply`; see §9, `--json`).
+
+> **Anything written to an *unmounted* container path (`/tmp`, `/root/foo`) is destroyed by `--rm` and does
+> not come out.** That's the wall, not a bug — but it means you must plan the exfil channel per dispatch: work
+> that must survive has to land in `/work`, go through the MCP, or be pushed.
+
+**Two models for getting data INTO the substrate:**
+
+- **Push (claude → MCP hinge):** the agent writes into the substrate *as it works*. Real-time, agent-driven;
+  best for **digestion** ("read this corpus → store engrams/docs"). Requires container **egress to the MCP**
+  (the HTTP endpoint, §4).
+- **Pull (substrate reads loom's output):** the substrate reads the mounted `/work` (the diff) + loom's stdout
+  (`--json` `Reply`) + records the `session_id`, then *its own code* ingests. Requires **no container egress** —
+  the more secure default, and it composes with a network-isolated sandbox.
+
+Rule of thumb: **digestion → push (MCP); code-build → pull (bind-mount + `--json` stdout).** Pull is the
+zero-egress default; add the hinge only when you want the agent to close the loop itself.
 
 ## 4. The hinge — wiring the pg-ai-stewards MCP
 
@@ -130,24 +156,30 @@ loom run --agent claude \
   --mcp-config /root/.claude/mcp.json \          # container path (lives in --claude-home)
   --allowed-tools "mcp__pg-ai-stewards__a2a_submit,mcp__pg-ai-stewards__doc_get,Bash,Read,Write,Edit" \
   --skip-permissions \
-  --events \
+  --json --events \
   "Implement the change described in a2a work item 4213; run the tests; submit the result via a2a_submit."
 ```
 
-Then: capture `stdout` (the final answer) and the `session_id` from `stderr`, store the id on the
+Then: parse the one-line JSON `Reply` from **stdout** (`--json`), store its `session_id` on the
 work-item, and inspect the mounted clone/home for artifacts (diff, PR branch) the agent produced.
+Streaming events (`--events`) went to stderr; the result JSON is clean on stdout.
 
 ## 9. Reading loom's output (subprocess)
 
-Today:
-- **stdout** — the agent's final answer text.
-- **stderr** — `[<backend> $<cost>]`, `[session <id> — resume: …]`, and `[<backend>: <err>]` on
-  error/interrupt (an interrupted turn reports `error_during_execution`).
+Pass **`--json`** and loom emits the `Reply` as a single JSON line to **stdout** — the clean pull
+channel for a subprocess caller:
 
-For clean programmatic parsing, prefer the **Go library** (`loom.Backends()["claude"].Open(ctx,
-loom.SessionOpts{…})` → `Session.Send` returns a `Reply{Text, SessionID, CostUSD, Turns, Err}`), or
-ask general-workspace for a **`--json` output mode** (small addition — emits the `Reply` as one JSON
-line, so you don't parse stderr). Recommended if you go subprocess.
+```json
+{"backend":"claude","text":"…final answer…","session_id":"<id>","cost_usd":0.06,"turns":1}
+```
+
+`error` is present only on failure (an interrupted turn reports `error_during_execution`). With
+`--json --events`, streaming tool-call/thinking events still go to **stderr** while the final JSON lands
+on stdout — so you log progress and parse the result cleanly. Store `session_id` on the work-item.
+
+Without `--json`: stdout is the answer text; stderr carries `[<backend> $<cost>]` / `[session <id> …]`.
+The Go library is also available directly (`loom.Backends()["claude"].Open(ctx, loom.SessionOpts{…})` →
+`Session.Send`/`SendStream` return the `Reply{Text, SessionID, CostUSD, Turns, Err}`).
 
 ## 10. Prerequisites checklist
 
@@ -168,5 +200,6 @@ the result before widening.
 
 ---
 
-*loom-side gaps this integration surfaces (ask general-workspace):* a `--json` output mode; optionally
-a `--clone <url>` convenience. Everything else in this guide is built and verified.
+*loom-side gaps this integration surfaces (ask general-workspace):* optionally a `--clone <url>`
+convenience for the provision-the-clone step. Everything else in this guide — including `--json` — is
+built and verified.
