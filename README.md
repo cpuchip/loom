@@ -197,7 +197,7 @@ isolated session's state dies with the container (`--rm`), so `--resume --isolat
 
 Config-file paths (`--mcp-config`, `--system-prompt-file`) are interpreted **on the target** — local host,
 remote box, or (under `--isolate`) inside the container. So for isolate, put them in `--claude-home` and pass
-the container path (e.g. `--mcp-config /root/.claude/mcp.json`).
+the container path (e.g. `--mcp-config /home/node/.claude/mcp.json`).
 
 **The substrate pattern:** keep a per-work-item `--claude-home` seeded with the substrate's skills +
 instructions + the pg-ai-stewards MCP config; mount the repo as `--dir`; run `--isolate --skip-permissions`;
@@ -229,6 +229,7 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 - ✅ **`remote + isolate`:** sandboxed claude *on* the remote box (ssh → docker-on-remote, volume paths resolved there via `$HOME`). Built + unit-tested (the composed argv); live-verify pending the `loom-claude` image built on the remote. Reach + wall composed — "manage remote sessions *safely*."
 - ✅ **The substrate hinge (config surface):** `--mcp-config` (wire the substrate MCP into the agent — reads/writes back), `--allowed-tools` (capability wall), `--skip-permissions` (headless, safe in `--isolate`), `--system-prompt-file` (instructions), and `--claude-home` (the container's `~/.claude`: skills/instructions/settings + **persisted sessions → resume+isolate now works**, live-verified). loom can now drive claude as a *configured* substrate worker, not just a chat.
 - ✅ **`--json` output + integration guide:** `--json` emits the `Reply` as one stdout line (the clean "pull" channel for subprocess callers; events stay on stderr). Full contract in [`docs/pg-ai-stewards-integration.md`](docs/pg-ai-stewards-integration.md) — subprocess model, the two walls, exfil channels (bind-mount / MCP / git / stdout), push-vs-pull data flow, the canonical dispatch.
+- ✅ **Proven by the substrate + non-root image fix (2026-07-01):** pg-ai-stewards ran the first real substrate→loom dispatch (pull-only, direct mode: claude read a corpus, wrote `findings.md` back, clean `--json` Reply). It surfaced one real bug — the `loom-claude` image ran claude as **root**, which Claude Code refuses for `--dangerously-skip-permissions`. Fixed: the image now runs as non-root `node` (mounts at `/home/node/.claude`); `isolate + --skip-permissions` live-verified. **Autonomous isolated headless dispatch is unblocked.**
 - **★ Next:** the first real `pg-ai-stewards → loom run --isolate --mcp-config …` dispatch (the viability test); tighter sandbox (scoped/short-lived token, egress limits — toward zero-trust); `agy --isolate`; panel role-routing (doer→critic).
 - **Backlog:** `--session-id`/`--fork-session` (pre-assign / branch) surfaced in the CLI; agy `--conversation` resume in the CLI; a condenser for very long sessions (pattern from OpenHands' `LLMSummarizingCondenser`); routing/role assignment across the panel.
 
@@ -243,16 +244,17 @@ backend*, not a near-term need:
   — verify the exact name before installing). Our **direct stream-json claude backend is
   dependency-free, single-process, and faster** — no reason to route it through ACP.
 - **Codex has no native ACP** either (community adapters only).
-- **Gemini CLI (`gemini`, the standalone — NOT `agy`) DOES have native `--acp`.** That's
-  the one real win: a small ACP-client backend driving `gemini --acp` would give a clean
-  Gemini (streaming + resume + tool-approval) and replace the agy transcript-scrape — *if*
-  we want Gemini badly enough to install `gemini`.
+- **Gemini CLI (`gemini`, the standalone) had native `--acp`** — but ⚠️ **Google EoL'd it for personal
+  accounts on 2026-06-18** (Pro/Ultra/free stopped serving; consolidated into closed-source `agy`). It
+  survives only for enterprise / API-key. So `gemini --acp` is a **dead path for us** — `agy` is now the
+  only Google terminal agent. The route to a fuller Gemini is not ACP; it's **container config-injection**
+  for agy (seed its config dir with `GEMINI.md`/skills/MCP inside an isolated container — the same
+  container-is-the-config-surface trick as `--claude-home`, generalized). Gate: agy's headless auth in a
+  Linux container (API-key vs OAuth-keyring) — feasibility-probe it before building the loom-agy backend.
 
-**Decision:** keep the direct CLI backends; add an *optional* ACP-client backend only when
-we want `gemini --acp` as a first-class Gemini, or if Codex ships native ACP. ACP's
-permission/approval surface is built for interactive IDEs, not headless orchestration, so
-it buys little for our use. (ACP→A2A is worth watching — same lineage as pg-ai-stewards'
-A2A engine.)
+**Decision:** keep the direct CLI backends; an ACP-client backend is only interesting now if **Codex** ships
+native ACP (Claude's direct stream-json is faster + dependency-free; `gemini --acp` is gone). (ACP→A2A is
+worth watching — same lineage as pg-ai-stewards' A2A engine.)
 
 ## Related
 

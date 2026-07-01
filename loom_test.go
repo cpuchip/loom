@@ -77,9 +77,10 @@ func TestClaudeCmd(t *testing.T) {
 	}
 
 	// isolate + claude-home: the home is mounted as the container's ~/.claude
-	// (writable → persisted sessions + skills/instructions injection)
+	// (writable → persisted sessions + skills/instructions injection). The image runs
+	// as non-root `node`, so ~/.claude lives at /home/node/.claude.
 	c = claudeCmd(ctx, "claude", SessionOpts{Isolate: true, Workdir: `C:\repo`, ClaudeHome: `C:\cfg`}, args)
-	if !strings.Contains(strings.Join(c.Args, " "), "C:/cfg:/root/.claude") {
+	if !strings.Contains(strings.Join(c.Args, " "), "C:/cfg:/home/node/.claude") {
 		t.Errorf("isolate+claude-home: %v", c.Args)
 	}
 

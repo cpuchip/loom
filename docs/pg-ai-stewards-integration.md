@@ -37,7 +37,9 @@ vision.
 
 This is the presiding covenant made operational: you hand the agent exactly the reach you intend.
 For autonomous dispatch, **always `--isolate`** — the container is the wall that makes
-`--skip-permissions` (headless, no prompts) safe.
+`--skip-permissions` (headless, no prompts) safe. (The `loom-claude` image runs as the non-root `node`
+user precisely so Claude Code accepts `--dangerously-skip-permissions` — it refuses it under root. Rebuild
+the image if yours predates 2026-07-01.)
 
 ## 3. Giving claude the code — and getting work back out
 
@@ -124,12 +126,12 @@ One directory, four payoffs:
 - **skills** — put them in `<dir>/skills/`
 - **instructions** — `<dir>/CLAUDE.md` (or use `--system-prompt-file <f>` to append a system prompt)
 - **settings / MCP** — `<dir>/settings.json`, or reference `<dir>` paths as container paths (e.g.
-  `--mcp-config /root/.claude/mcp.json`)
+  `--mcp-config /home/node/.claude/mcp.json`)
 - **persisted session state** — this is what makes **resume + isolate** work
 
 **Path note:** config-file paths (`--mcp-config`, `--system-prompt-file`) are interpreted *on the
 target*. Under `--isolate`, put the files in `--claude-home` and pass the **container** path
-(`/root/.claude/…`), not the host path.
+(`/home/node/.claude/…`, the non-root `node` user's home), not the host path.
 
 ## 6. Session identity — resume as the durable handle
 
@@ -153,7 +155,7 @@ loom run --agent claude \
   --isolate \
   --dir /var/loom/wi-4213/clone \
   --claude-home /var/loom/wi-4213/home \        # seeded with skills/ + CLAUDE.md + mcp.json
-  --mcp-config /root/.claude/mcp.json \          # container path (lives in --claude-home)
+  --mcp-config /home/node/.claude/mcp.json \     # container path (lives in --claude-home; non-root node home)
   --allowed-tools "mcp__pg-ai-stewards__a2a_submit,mcp__pg-ai-stewards__doc_get,Bash,Read,Write,Edit" \
   --skip-permissions \
   --json --events \

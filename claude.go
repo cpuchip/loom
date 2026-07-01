@@ -299,13 +299,15 @@ func dockerArgs(wd, creds, claudeHome, image string, claudeArgs []string) []stri
 	if image == "" {
 		image = "loom-claude"
 	}
+	// the loom-claude image runs as the non-root `node` user, so ~/.claude is here
+	const claudeDir = "/home/node/.claude"
 	a := []string{"docker", "run", "-i", "--rm"}
 	if claudeHome != "" {
-		a = append(a, "-v", claudeHome+":/root/.claude")
+		a = append(a, "-v", claudeHome+":"+claudeDir)
 	}
 	a = append(a, "-v", wd+":/work", "-w", "/work")
 	if creds != "" {
-		a = append(a, "-v", creds+":/root/.claude/.credentials.json:ro")
+		a = append(a, "-v", creds+":"+claudeDir+"/.credentials.json:ro")
 	}
 	a = append(a, image, "claude")
 	return append(a, claudeArgs...)

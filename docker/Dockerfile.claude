@@ -2,8 +2,12 @@
 #
 # loom runs Claude Code inside this container so the substrate can command a full
 # agentic session that CANNOT touch the host beyond the repo mounted at /work.
-# The agent's only host paths are /work (the repo, read-write) and /root/.claude
-# (the subscription auth, mounted read-only by loom at run time).
+# The agent's only host paths are /work (the repo, read-write) and
+# /home/node/.claude (the subscription auth, mounted read-only by loom at run time).
+#
+# Runs as the non-root `node` user: Claude Code REFUSES --dangerously-skip-permissions
+# under root ("cannot be used with root/sudo privileges") — which autonomous headless
+# dispatch requires. (Found by the substrate's first isolated dispatch, 2026-07-01.)
 #
 # Build:  docker build -t loom-claude -f docker/Dockerfile.claude .
 # loom drives it via:  loom run --agent claude --isolate --dir <repo> "…"
@@ -20,6 +24,13 @@ RUN npm install -g @anthropic-ai/claude-code \
 
 # Don't run git's safe-directory guard against a bind-mounted repo owned by the host.
 RUN git config --system --add safe.directory '*'
+
+# Run as the built-in non-root `node` user (uid 1000). Pre-create its ~/.claude so a
+# mounted .credentials.json / --claude-home lands in a node-owned dir — otherwise
+# docker creates the mount's parent dir as root and claude (as node) can't write its
+# session state there.
+RUN mkdir -p /home/node/.claude && chown -R node:node /home/node/.claude
+USER node
 
 WORKDIR /work
 ENTRYPOINT []
