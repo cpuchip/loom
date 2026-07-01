@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestResultParsing is a pure unit test: the claude `result` event shape we parse.
@@ -180,4 +181,64 @@ func TestClaudeResumeSmoke(t *testing.T) {
 		t.Fatalf("resumed session did not recall across the process restart; got %q", r.Text)
 	}
 	t.Logf("resume OK across processes: id=%s turn=%q", id, r.Text)
+}
+
+// TestClaudeInterruptSmoke proves a turn in flight can be STOPPED, and the session
+// then STEERED (a fresh instruction on the still-live session). The interrupt
+// terminates the turn with is_error (subtype error_during_execution) — a clean,
+// deterministic signal, not a timing guess. Opt-in via LOOM_SMOKE=1.
+func TestClaudeInterruptSmoke(t *testing.T) {
+	if os.Getenv("LOOM_SMOKE") != "1" {
+		t.Skip("set LOOM_SMOKE=1 to run the live interrupt smoke (spends a little money)")
+	}
+	short := func(s string) string {
+		if len(s) > 48 {
+			return s[:48] + "…"
+		}
+		return s
+	}
+	b := ClaudeBackend{Bin: "claude"}
+	sess, err := b.Open(context.Background(), SessionOpts{Model: "haiku"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	it, ok := sess.(Interruptible)
+	if !ok {
+		t.Fatal("claude session should be Interruptible")
+	}
+
+	// a long task (many tokens, no tools) → still generating at +2s when we interrupt
+	done := make(chan Reply, 1)
+	go func() {
+		r, _ := sess.SendStream(context.Background(),
+			"Count from 1 to 200. Put each number on its own line and after each write one full sentence about it. Do not use any tools.", nil)
+		done <- r
+	}()
+
+	time.Sleep(2 * time.Second)
+	tInt := time.Now()
+	if err := it.Interrupt(); err != nil {
+		t.Fatalf("interrupt: %v", err)
+	}
+	select {
+	case r := <-done:
+		// A clean completion has Err=="" (subtype success); an interrupt sets is_error.
+		if r.Err == "" {
+			t.Fatalf("turn completed instead of interrupting (Err empty); text=%q", short(r.Text))
+		}
+		t.Logf("interrupted in %.1fs (err=%q)", time.Since(tInt).Seconds(), r.Err)
+	case <-time.After(45 * time.Second):
+		t.Fatal("turn did not return within 45s of interrupt")
+	}
+
+	// STEER: the subprocess is still alive — a new instruction must work
+	r, err := sess.Send(context.Background(), "Never mind that. Reply with ONLY the single word: ALIVE")
+	if err != nil {
+		t.Fatalf("steer send after interrupt: %v", err)
+	}
+	if !strings.Contains(strings.ToUpper(r.Text), "ALIVE") {
+		t.Fatalf("session not steerable after interrupt; got %q", short(r.Text))
+	}
+	t.Logf("steer OK after interrupt: %q", short(r.Text))
 }

@@ -89,10 +89,22 @@ loom run --agent claude --resume <id> "what number?"         # → 88, from a br
 ```
 
 Under the hood: `claude --resume <id>` (the real CLI also has `--session-id <uuid>` to *pre-assign* an id,
-`--fork-session` to branch, `-c` for most-recent — natural follow-ons). **The one honest gap:** it's
-turn-*serialized* — loom streams output live per turn (`--events`) but can't inject a message or **interrupt
-while claude is working**. Claude's stdin protocol allows it (`--replay-user-messages` acks input); loom
-doesn't expose mid-turn steering yet. That's the next thing for driving long-running (esp. remote) agents.
+`--fork-session` to branch, `-c` for most-recent — natural follow-ons).
+
+- **Interrupt a turn in flight & steer** (`Interrupt()`): stop the agent *while it's working* and redirect it,
+  without losing the session. loom writes a stream-json `control_request`/`subtype:interrupt` to stdin (the
+  real wire format, probe-verified 2026-06-30 — claude acks with a `control_response` success, then ends the
+  turn with a `result` `subtype:error_during_execution`); the subprocess stays alive, so a following `Send`
+  steers with full context. ✅ verified by a live oracle: interrupt a running turn (~0s to stop) → `Send`
+  "reply ALIVE" → `ALIVE`, context intact. Race-checked (`go test -race`) on the concurrent read-vs-interrupt
+  path. In the CLI, **the first Ctrl-C during a turn interrupts the agent** (not loom) — type your next line to
+  steer; a second Ctrl-C at the prompt exits. Programmatically it's the optional `loom.Interruptible`
+  interface (`if it, ok := sess.(loom.Interruptible); ok { it.Interrupt() }`).
+
+The session-lifecycle triad is complete on the real path: **carry** (across turns) · **resume** (across
+process death) · **interrupt+steer** (mid-turn). The only remaining nuance is *concurrent mid-turn injection
+without* interrupting (queue-while-working) — undocumented upstream and not needed: interrupt-then-instruct
+covers the steering case cleanly.
 
 ## Isolation — the wall (`--isolate`)
 
@@ -166,7 +178,8 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 - **North star:** loom = the substrate's *agent fabric* — a uniform, **walled** way to summon intelligence; its soul is running agentic harnesses (Claude Code, agy) the substrate can't run itself, safely. Axes: agency (raw model ↔ agent) × trust (local ↔ sandboxed ↔ remote).
 - ✅ **Remote (`--remote`):** ssh transport **live-verified end-to-end** (2026-06-30) — a Windows `loom.exe` drove a Claude Code agent on a remote Ubuntu box, its `→ Bash` tool-events streaming back, ~$0.12/turn. The **trust axis is complete** on the real path (direct / `--isolate` / `--remote`).
 - ✅ **Resume (`--resume <id>`):** durable sessions — reattach to a prior session across a process restart / dropped pipe (context restored from claude's on-disk session store). Verified 2026-06-30 by a two-process oracle + CLI e2e. The piece that makes a **remote** session survive a broken pipe.
-- **★ Next:** **mid-turn interrupt/steer** (send a message *while* claude works — turn-serialization is the last session gap, and the thing driving long-running remote agents needs); `remote+isolate` (sandboxed claude on a remote box); tighter sandbox (scoped/short-lived token, egress limits); `agy --isolate`; panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
+- ✅ **Interrupt + steer (`Interrupt()` / Ctrl-C):** stop a turn in flight and redirect on the live session (stream-json `control_request` interrupt; probe-verified wire format). Live oracle + `-race` on the concurrent path. **Completes the session-lifecycle triad** (carry / resume / interrupt+steer).
+- **★ Next:** `remote+isolate` (sandboxed claude on a remote box — reach + wall composed); tighter sandbox (scoped/short-lived token, egress limits); `agy --isolate`; panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
 - **Backlog:** `--session-id`/`--fork-session` (pre-assign / branch) surfaced in the CLI; agy `--conversation` resume in the CLI; a condenser for very long sessions (pattern from OpenHands' `LLMSummarizingCondenser`); routing/role assignment across the panel.
 
 ## ACP — researched 2026-06-29, decision: skip for now

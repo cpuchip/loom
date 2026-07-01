@@ -39,13 +39,16 @@ type claudeSession struct {
 	bin  string
 	opts SessionOpts
 
-	mu        sync.Mutex
+	turnMu sync.Mutex // one turn at a time; held across a SendStream turn
+	ioMu   sync.Mutex // guards stdin writes + the fields below (NOT held during the read)
+
 	started   bool
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	sc        *bufio.Scanner
 	sessionID string
 	lastCost  float64 // cumulative cost seen so far (for per-turn deltas)
+	reqID     int     // control_request id counter (interrupts)
 }
 
 func (s *claudeSession) ensureStarted(ctx context.Context) error {
@@ -76,18 +79,21 @@ func (s *claudeSession) Send(ctx context.Context, prompt string) (Reply, error) 
 }
 
 func (s *claudeSession) SendStream(ctx context.Context, prompt string, onEvent func(Event)) (Reply, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ensureStarted(ctx); err != nil {
+	s.turnMu.Lock() // one turn at a time; NOT held during Interrupt (that uses ioMu)
+	defer s.turnMu.Unlock()
+
+	s.ioMu.Lock()
+	err := s.ensureStarted(ctx)
+	s.ioMu.Unlock()
+	if err != nil {
 		return Reply{Backend: "claude", Err: err.Error()}, err
 	}
-	// one user turn, as a single NDJSON line
-	msg := map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": prompt}}
-	line, _ := json.Marshal(msg)
-	if _, err := fmt.Fprintf(s.stdin, "%s\n", line); err != nil {
+	if err := s.writeUser(prompt); err != nil {
 		return Reply{Backend: "claude", Err: err.Error()}, err
 	}
-	// read events until THIS turn's result event, emitting along the way
+	// Read events until THIS turn's result, holding NO lock — so Interrupt (which
+	// writes a control_request under ioMu) can fire while we're mid-read. The scanner
+	// is single-reader by construction (turnMu serializes turns).
 	for s.sc.Scan() {
 		var ev map[string]any
 		if json.Unmarshal(s.sc.Bytes(), &ev) != nil {
@@ -105,14 +111,25 @@ func (s *claudeSession) SendStream(ctx context.Context, prompt string, onEvent f
 			if n, ok := ev["num_turns"].(float64); ok {
 				r.Turns = int(n)
 			}
+			// An interrupt ends the turn with subtype "error_during_execution" and
+			// is_error=true but no result text — surface it as a clear error so the
+			// caller knows the turn was cut short (the session stays alive).
+			if isErr, _ := ev["is_error"].(bool); isErr && r.Err == "" {
+				if r.Text != "" {
+					r.Err = r.Text
+				} else if sub, _ := ev["subtype"].(string); sub != "" {
+					r.Err = sub
+				} else {
+					r.Err = "error"
+				}
+			}
+			s.ioMu.Lock()
 			if cum, ok := ev["total_cost_usd"].(float64); ok {
 				r.CostUSD = cum - s.lastCost // total_cost_usd is cumulative across turns
 				s.lastCost = cum
 			}
-			if isErr, _ := ev["is_error"].(bool); isErr && r.Err == "" {
-				r.Err = r.Text
-			}
 			s.sessionID = r.SessionID
+			s.ioMu.Unlock()
 			emit(onEvent, Event{Kind: EvResult, Backend: "claude", Text: r.Text})
 			return r, nil
 		}
@@ -122,6 +139,42 @@ func (s *claudeSession) SendStream(ctx context.Context, prompt string, onEvent f
 	}
 	return Reply{Backend: "claude", Err: "stream ended before result"},
 		fmt.Errorf("claude: stream ended before a result event (process exited?)")
+}
+
+// writeUser sends one user-message turn as a single NDJSON line (under ioMu, so it
+// can't interleave with an Interrupt write).
+func (s *claudeSession) writeUser(content string) error {
+	msg := map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": content}}
+	line, _ := json.Marshal(msg)
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+	if s.stdin == nil {
+		return fmt.Errorf("claude: session not started")
+	}
+	_, err := fmt.Fprintf(s.stdin, "%s\n", line)
+	return err
+}
+
+// Interrupt stops the in-flight turn: it writes a stream-json control_request with
+// subtype "interrupt" (verified 2026-06-30 — claude acks with a control_response
+// success, then ends the turn with a result subtype "error_during_execution").
+// The subprocess stays alive; steer by calling Send with a new instruction.
+// Safe to call concurrently with SendStream (writes under ioMu; the read holds no lock).
+func (s *claudeSession) Interrupt() error {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+	if s.stdin == nil {
+		return fmt.Errorf("claude: no session to interrupt")
+	}
+	s.reqID++
+	msg := map[string]any{
+		"type":       "control_request",
+		"request_id": fmt.Sprintf("int-%d", s.reqID),
+		"request":    map[string]any{"subtype": "interrupt"},
+	}
+	line, _ := json.Marshal(msg)
+	_, err := fmt.Fprintf(s.stdin, "%s\n", line)
+	return err
 }
 
 // emitClaudeContent walks a claude message event's content blocks → typed events.
@@ -241,16 +294,21 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-func (s *claudeSession) SessionID() string { return s.sessionID }
+func (s *claudeSession) SessionID() string {
+	s.ioMu.Lock()
+	defer s.ioMu.Unlock()
+	return s.sessionID
+}
 
 func (s *claudeSession) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stdin != nil {
-		_ = s.stdin.Close() // EOF → claude finishes pending work and exits
+	s.ioMu.Lock()
+	stdin, cmd := s.stdin, s.cmd
+	s.ioMu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close() // EOF → claude finishes pending work and exits
 	}
-	if s.cmd != nil {
-		return s.cmd.Wait()
+	if cmd != nil {
+		return cmd.Wait()
 	}
 	return nil
 }

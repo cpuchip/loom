@@ -48,6 +48,15 @@ type Session interface {
 	Close() error
 }
 
+// Interruptible is an optional capability: a session whose IN-FLIGHT turn can be
+// stopped while the agent is working (claude's stream-json control_request
+// interrupt). The session stays alive — to steer, call Send with a new
+// instruction after Interrupt returns; the context is intact. Callers type-assert
+// for it: `if it, ok := sess.(Interruptible); ok { it.Interrupt() }`.
+type Interruptible interface {
+	Interrupt() error
+}
+
 // Backends returns the built-in backend registry keyed by name.
 func Backends() map[string]Backend {
 	return map[string]Backend{

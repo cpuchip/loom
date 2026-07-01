@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"unicode/utf8"
 
@@ -82,6 +83,9 @@ func cmdRun(args []string) error {
 		return err
 	}
 	fmt.Println(r.Text)
+	if r.Err != "" {
+		fmt.Fprintf(os.Stderr, "[%s: %s]\n", r.Backend, r.Err)
+	}
 	if r.CostUSD > 0 {
 		fmt.Fprintf(os.Stderr, "[%s $%.4f]\n", r.Backend, r.CostUSD)
 	}
@@ -124,6 +128,9 @@ func cmdChat(args []string) error {
 			return err
 		}
 		fmt.Println(r.Text)
+		if r.Err != "" {
+			fmt.Fprintf(os.Stderr, "[%s: %s]\n", r.Backend, r.Err)
+		}
 		if r.CostUSD > 0 {
 			fmt.Fprintf(os.Stderr, "[%s $%.4f this turn]\n", r.Backend, r.CostUSD)
 		}
@@ -315,6 +322,23 @@ func reviewPrompt(label, content string) string {
 // sendTurn runs one turn, optionally streaming the agent's tool calls + thinking
 // to stderr (the work) while the final answer is returned in the Reply.
 func sendTurn(sess loom.Session, prompt string, showEvents bool) (loom.Reply, error) {
+	// While this turn runs, the first Ctrl-C interrupts the AGENT's work (not loom) —
+	// the session stays alive, so you can steer with your next message. Default
+	// Ctrl-C (exit loom) is restored the moment the turn returns.
+	if it, ok := sess.(loom.Interruptible); ok {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt)
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-sigCh:
+				fmt.Fprintln(os.Stderr, "  ⎋ interrupting…")
+				_ = it.Interrupt()
+			case <-done:
+			}
+		}()
+		defer func() { signal.Stop(sigCh); close(done) }()
+	}
 	if showEvents {
 		return sess.SendStream(context.Background(), prompt, eventPrinter())
 	}
