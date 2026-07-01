@@ -177,11 +177,14 @@ func emitClaudeContent(onEvent func(Event), ev map[string]any) {
 // docker on the remote with remote paths/creds — is a v2; remote wins here.)
 func claudeCmd(ctx context.Context, bin string, opts SessionOpts, claudeArgs []string) *exec.Cmd {
 	if opts.Remote != "" {
-		remote := strings.Join(append([]string{bin}, claudeArgs...), " ")
+		inner := strings.Join(append([]string{bin}, claudeArgs...), " ")
 		if opts.Workdir != "" {
-			remote = "cd " + opts.Workdir + " && " + remote
+			inner = "cd " + opts.Workdir + " && " + inner
 		}
-		return exec.CommandContext(ctx, "ssh", "-T", opts.Remote, remote)
+		// run inside a LOGIN shell so the remote's full PATH loads — a plain
+		// `ssh host cmd` uses a non-interactive shell that misses nvm / npm-global
+		// installs, so `claude` reads as "command not found".
+		return exec.CommandContext(ctx, "ssh", "-T", opts.Remote, "bash", "-lc", shellQuote(inner))
 	}
 	if opts.Isolate {
 		a := dockerRunArgs(opts, claudeArgs)
@@ -220,6 +223,12 @@ func dockerRunArgs(opts SessionOpts, claudeArgs []string) []string {
 // dockerVol normalizes a host path for a Docker bind mount (C:\path → C:/path,
 // which Docker Desktop on Windows accepts).
 func dockerVol(host string) string { return filepath.ToSlash(host) }
+
+// shellQuote single-quotes s for a POSIX shell, so `bash -lc <script>` on the far
+// side of ssh receives the whole script (spaces, &&, flags) as one argument.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 func (s *claudeSession) SessionID() string { return s.sessionID }
 

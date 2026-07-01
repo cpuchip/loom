@@ -104,12 +104,15 @@ The whole trust axis is one transport tree in the claude backend (`claudeCmd`):
 ```
 direct            claude …                                  (full host access)
 --isolate         docker run -i … loom-claude claude …      (host walled)
---remote H        ssh -T H  cd <dir> && claude …            (another machine)
+--remote H        ssh -T H  bash -lc 'cd <dir> && claude …'  (another machine)
 (remote+isolate — docker on the remote — is a v2)
 ```
 
 Requirements: the remote box has **`claude` installed + authed** (it uses its *own* `~/.claude`), and your
-ssh key reaches it. Verify with your own agent-loaded shell (`! loom run --remote …`) — a passphrase-locked
+ssh key reaches it. loom runs the remote command in a **login shell** (`bash -lc`) so the box's full PATH
+loads — a plain non-interactive `ssh host "claude …"` uses a shell that misses nvm / npm-global / `~/.local/bin`
+installs and dies with `claude: command not found` *even when claude works fine in your interactive ssh session
+there* (a real gotcha, hit + fixed 2026-06-30). Verify from your own agent-loaded shell — a passphrase-locked
 key with no agent can't authenticate from an automated context.
 
 `--model` overrides the model (e.g. `--model haiku`); `--dir` sets the agent's cwd.

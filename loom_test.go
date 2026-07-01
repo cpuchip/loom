@@ -75,10 +75,12 @@ func TestClaudeCmd(t *testing.T) {
 		t.Errorf("isolate: %v", c.Args)
 	}
 
-	// remote: ssh -T host "cd <dir> && claude …"
+	// remote: ssh -T host bash -lc 'cd <dir> && claude …' — the login shell (-lc) is
+	// load-bearing: a plain non-interactive ssh command misses the remote's claude PATH.
 	c = claudeCmd(ctx, "claude", SessionOpts{Remote: "cpuchip@box", Workdir: "/r"}, args)
 	j = strings.Join(c.Args, " ")
-	if c.Args[0] != "ssh" || !strings.Contains(j, "-T cpuchip@box") || !strings.Contains(j, "cd /r && claude -p") {
+	if c.Args[0] != "ssh" || !strings.Contains(j, "-T cpuchip@box") ||
+		!strings.Contains(j, "bash -lc") || !strings.Contains(j, "cd /r && claude -p") {
 		t.Errorf("remote: %v", c.Args)
 	}
 }
