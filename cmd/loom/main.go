@@ -54,31 +54,60 @@ func pickBackend(name string) (loom.Backend, error) {
 	return b, nil
 }
 
+// sessFlags is the shared flag set for the session commands (run, chat) — the
+// backend selector plus the whole claude-configuration surface.
+type sessFlags struct {
+	agent, model, dir, remote, resume            *string
+	mcpConfig, allowedTools, permMode            *string
+	sysPromptFile, claudeHome                    *string
+	events, isolate, skipPerms                   *bool
+}
+
+func addSessionFlags(fs *flag.FlagSet) *sessFlags {
+	return &sessFlags{
+		agent:         fs.String("agent", "claude", "backend (loom agents)"),
+		model:         fs.String("model", "", "model override"),
+		dir:           fs.String("dir", "", "working dir (the agent's cwd / the corpus it works)"),
+		events:        fs.Bool("events", false, "stream tool calls + thinking to stderr"),
+		isolate:       fs.Bool("isolate", false, "run claude in a docker sandbox (host walled off)"),
+		remote:        fs.String("remote", "", "run claude on a remote box over ssh (e.g. cpuchip@host)"),
+		resume:        fs.String("resume", "", "resume a prior claude session by id"),
+		mcpConfig:     fs.String("mcp-config", "", "claude --mcp-config: wire in MCP server(s) from a JSON file (the hinge into pg-ai-stewards)"),
+		allowedTools:  fs.String("allowed-tools", "", "claude --allowed-tools: scope which tools (incl. MCP) the agent may call"),
+		permMode:      fs.String("permission-mode", "", "claude --permission-mode (e.g. acceptEdits, plan)"),
+		skipPerms:     fs.Bool("skip-permissions", false, "claude --dangerously-skip-permissions (headless; safe only INSIDE --isolate)"),
+		sysPromptFile: fs.String("system-prompt-file", "", "claude --append-system-prompt-file: inject instructions"),
+		claudeHome:    fs.String("claude-home", "", "(--isolate) host dir mounted as the container's ~/.claude: skills/instructions/settings/MCP + PERSISTED sessions (enables resume+isolate)"),
+	}
+}
+
+func (sf *sessFlags) opts() loom.SessionOpts {
+	return loom.SessionOpts{
+		Workdir: *sf.dir, Model: *sf.model, Isolate: *sf.isolate, Remote: *sf.remote, Resume: *sf.resume,
+		MCPConfig: *sf.mcpConfig, AllowedTools: *sf.allowedTools, PermissionMode: *sf.permMode,
+		SkipPermissions: *sf.skipPerms, SystemPromptFile: *sf.sysPromptFile, ClaudeHome: *sf.claudeHome,
+	}
+}
+
 // run: one-shot prompt → single reply.
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	agent := fs.String("agent", "claude", "backend (loom agents)")
-	model := fs.String("model", "", "model override")
-	dir := fs.String("dir", "", "working dir")
-	events := fs.Bool("events", false, "stream tool calls + thinking to stderr")
-	isolate := fs.Bool("isolate", false, "run claude in a docker sandbox (host walled off)")
-	remote := fs.String("remote", "", "run claude on a remote box over ssh (e.g. cpuchip@host)")
-	resume := fs.String("resume", "", "resume a prior claude session by id (from an earlier run's session_id)")
+	sf := addSessionFlags(fs)
 	_ = fs.Parse(args)
 	prompt := strings.Join(fs.Args(), " ")
 	if prompt == "" {
 		return fmt.Errorf("run: need a prompt")
 	}
-	b, err := pickBackend(*agent)
+	b, err := pickBackend(*sf.agent)
 	if err != nil {
 		return err
 	}
-	sess, err := b.Open(context.Background(), loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate, Remote: *remote, Resume: *resume})
+	sess, err := b.Open(context.Background(), sf.opts())
 	if err != nil {
 		return err
 	}
 	defer sess.Close()
-	r, err := sendTurn(sess, prompt, *events)
+	r, err := sendTurn(sess, prompt, *sf.events)
 	if err != nil {
 		return err
 	}
@@ -98,24 +127,18 @@ func cmdRun(args []string) error {
 // chat: persistent multi-turn session — one message per stdin line.
 func cmdChat(args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
-	agent := fs.String("agent", "claude", "backend (loom agents)")
-	model := fs.String("model", "", "model override")
-	dir := fs.String("dir", "", "working dir")
-	events := fs.Bool("events", false, "stream tool calls + thinking to stderr")
-	isolate := fs.Bool("isolate", false, "run claude in a docker sandbox (host walled off)")
-	remote := fs.String("remote", "", "run claude on a remote box over ssh (e.g. cpuchip@host)")
-	resume := fs.String("resume", "", "resume a prior claude session by id (from an earlier session's id)")
+	sf := addSessionFlags(fs)
 	_ = fs.Parse(args)
-	b, err := pickBackend(*agent)
+	b, err := pickBackend(*sf.agent)
 	if err != nil {
 		return err
 	}
-	sess, err := b.Open(context.Background(), loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate, Remote: *remote, Resume: *resume})
+	sess, err := b.Open(context.Background(), sf.opts())
 	if err != nil {
 		return err
 	}
 	defer sess.Close()
-	fmt.Fprintf(os.Stderr, "loom chat — %s — one message per line, Ctrl-D to end\n", *agent)
+	fmt.Fprintf(os.Stderr, "loom chat — %s — one message per line, Ctrl-D to end\n", *sf.agent)
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 1<<20), 16<<20)
 	for in.Scan() {
@@ -123,7 +146,7 @@ func cmdChat(args []string) error {
 		if line == "" {
 			continue
 		}
-		r, err := sendTurn(sess, line, *events)
+		r, err := sendTurn(sess, line, *sf.events)
 		if err != nil {
 			return err
 		}

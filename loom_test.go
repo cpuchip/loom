@@ -76,6 +76,13 @@ func TestClaudeCmd(t *testing.T) {
 		t.Errorf("isolate: %v", c.Args)
 	}
 
+	// isolate + claude-home: the home is mounted as the container's ~/.claude
+	// (writable → persisted sessions + skills/instructions injection)
+	c = claudeCmd(ctx, "claude", SessionOpts{Isolate: true, Workdir: `C:\repo`, ClaudeHome: `C:\cfg`}, args)
+	if !strings.Contains(strings.Join(c.Args, " "), "C:/cfg:/root/.claude") {
+		t.Errorf("isolate+claude-home: %v", c.Args)
+	}
+
 	// remote: ssh -T host bash -lc 'cd <dir> && claude …' — the login shell (-lc) is
 	// load-bearing: a plain non-interactive ssh command misses the remote's claude PATH.
 	c = claudeCmd(ctx, "claude", SessionOpts{Remote: "cpuchip@box", Workdir: "/r"}, args)
@@ -114,6 +121,20 @@ func TestClaudeArgs(t *testing.T) {
 	withResume := strings.Join(claudeArgs(SessionOpts{Model: "haiku", Resume: "sess-abc"}), " ")
 	if !strings.Contains(withResume, "--model haiku") || !strings.Contains(withResume, "--resume sess-abc") {
 		t.Errorf("resume args: %s", withResume)
+	}
+
+	// the substrate-integration passthroughs (the hinge + headless + instructions)
+	full := strings.Join(claudeArgs(SessionOpts{
+		MCPConfig: "/cfg/mcp.json", AllowedTools: "mcp__pg,Bash", PermissionMode: "acceptEdits",
+		SkipPermissions: true, SystemPromptFile: "/cfg/sys.md",
+	}), " ")
+	for _, want := range []string{
+		"--mcp-config /cfg/mcp.json", "--allowed-tools mcp__pg,Bash", "--permission-mode acceptEdits",
+		"--dangerously-skip-permissions", "--append-system-prompt-file /cfg/sys.md",
+	} {
+		if !strings.Contains(full, want) {
+			t.Errorf("config args missing %q: %s", want, full)
+		}
 	}
 }
 

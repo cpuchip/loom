@@ -116,7 +116,8 @@ full-filesystem agent commanded by a backend could touch the host. `--isolate` i
 
 - `/work` — the repo (`--dir`), the one host path the agent can read/write, and
 - `~/.claude/.credentials.json` — the subscription auth, mounted **read-only** (claude writes its own
-  session state into an ephemeral in-container `~/.claude`, gone on `--rm`).
+  session state into an ephemeral in-container `~/.claude`, gone on `--rm` — pass `--claude-home` to persist
+  it and to inject skills/instructions; see *Configuring the agent* below).
 
 ```sh
 docker build -t loom-claude -f docker/Dockerfile.claude .
@@ -167,6 +168,41 @@ your own agent-loaded shell — a passphrase-locked key with no agent can't auth
 
 `--model` overrides the model (e.g. `--model haiku`); `--dir` sets the agent's cwd.
 
+## Configuring the agent — the substrate hinge
+
+For a backend (pg-ai-stewards) to drive claude as a *worker* — not just ask it a question — loom forwards
+claude's configuration flags, and under `--isolate` controls the container's `~/.claude`. **Two walls, set
+independently:**
+
+- **Filesystem wall** — `--isolate` / `--remote`: *where* the agent can touch (container / remote / host).
+- **Capability wall** — `--mcp-config` + `--allowed-tools`: *what* it can call.
+
+| loom flag | claude flag | for |
+|---|---|---|
+| `--mcp-config <file>` | `--mcp-config` | **the hinge** — wire in an MCP server (e.g. pg-ai-stewards) so the agent reads/writes the substrate back |
+| `--allowed-tools <list>` | `--allowed-tools` | scope which tools (incl. MCP) it may call — the capability wall |
+| `--permission-mode <mode>` | `--permission-mode` | e.g. `acceptEdits`, `plan` |
+| `--skip-permissions` | `--dangerously-skip-permissions` | headless autonomy — **safe only inside `--isolate`** (the container is the wall) |
+| `--system-prompt-file <f>` | `--append-system-prompt-file` | inject instructions |
+| `--claude-home <dir>` | *(mount)* | `--isolate` only — the injection point, below |
+
+**`--claude-home <dir>` is the injection point for everything under `--isolate`.** It mounts a host directory
+as the container's *writable* `~/.claude`, so it carries **skills** (`<dir>/skills/`), **instructions**
+(`<dir>/CLAUDE.md`), settings, MCP config — and it **persists claude's session state across containers**. That
+last part is what makes **resume + isolate** work: every `docker run` is a fresh container, but the session
+lives in the mounted home, so a later `--resume` reattaches. Verified 2026-06-30 (remember 55 in one container
+→ recall 55 in a brand-new one, `projects/`/`sessions/` written to the home). *Without* `--claude-home`, an
+isolated session's state dies with the container (`--rm`), so `--resume --isolate` silently starts fresh.
+
+Config-file paths (`--mcp-config`, `--system-prompt-file`) are interpreted **on the target** — local host,
+remote box, or (under `--isolate`) inside the container. So for isolate, put them in `--claude-home` and pass
+the container path (e.g. `--mcp-config /root/.claude/mcp.json`).
+
+**The substrate pattern:** keep a per-work-item `--claude-home` seeded with the substrate's skills +
+instructions + the pg-ai-stewards MCP config; mount the repo as `--dir`; run `--isolate --skip-permissions`;
+store loom's `session_id` on the work-item so a later dispatch resumes by re-mounting the same home. That is
+loom as the substrate's hands: reach (dir), voice back (MCP hinge), wall (isolate), memory (resume).
+
 ### Test
 
 ```sh
@@ -187,7 +223,8 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 - ✅ **Resume (`--resume <id>`):** durable sessions — reattach to a prior session across a process restart / dropped pipe (context restored from claude's on-disk session store). Verified 2026-06-30 by a two-process oracle + CLI e2e. The piece that makes a **remote** session survive a broken pipe.
 - ✅ **Interrupt + steer (`Interrupt()` / Ctrl-C):** stop a turn in flight and redirect on the live session (stream-json `control_request` interrupt; probe-verified wire format). Live oracle + `-race` on the concurrent path. **Completes the session-lifecycle triad** (carry / resume / interrupt+steer).
 - ✅ **`remote + isolate`:** sandboxed claude *on* the remote box (ssh → docker-on-remote, volume paths resolved there via `$HOME`). Built + unit-tested (the composed argv); live-verify pending the `loom-claude` image built on the remote. Reach + wall composed — "manage remote sessions *safely*."
-- **★ Next:** tighter sandbox (scoped/short-lived token, egress limits — toward zero-trust); `agy --isolate`; panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
+- ✅ **The substrate hinge (config surface):** `--mcp-config` (wire the substrate MCP into the agent — reads/writes back), `--allowed-tools` (capability wall), `--skip-permissions` (headless, safe in `--isolate`), `--system-prompt-file` (instructions), and `--claude-home` (the container's `~/.claude`: skills/instructions/settings + **persisted sessions → resume+isolate now works**, live-verified). loom can now drive claude as a *configured* substrate worker, not just a chat.
+- **★ Next:** the first real `pg-ai-stewards → loom run --isolate --mcp-config …` dispatch (the viability test); tighter sandbox (scoped/short-lived token, egress limits — toward zero-trust); `agy --isolate`; panel role-routing (doer→critic).
 - **Backlog:** `--session-id`/`--fork-session` (pre-assign / branch) surfaced in the CLI; agy `--conversation` resume in the CLI; a condenser for very long sessions (pattern from OpenHands' `LLMSummarizingCondenser`); routing/role assignment across the panel.
 
 ## ACP — researched 2026-06-29, decision: skip for now

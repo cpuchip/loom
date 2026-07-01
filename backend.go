@@ -25,6 +25,16 @@ type SessionOpts struct {
 	Image   string // docker image for isolation ("" = loom-claude)
 	Remote  string // run the agent on a remote box over ssh (e.g. "cpuchip@host"); "" = local
 	Resume  string // resume a prior session by id (claude --resume); "" = fresh session
+
+	// Configuring the claude agent — the substrate-integration surface. Paths in the
+	// config-file fields are interpreted on the TARGET (local host / remote box /
+	// inside the container via ClaudeHome), so put them where the agent will run.
+	MCPConfig        string // claude --mcp-config: wire in MCP server(s) from JSON — the hinge back into pg-ai-stewards
+	AllowedTools     string // claude --allowed-tools: scope which tools (incl. MCP) the agent may call
+	PermissionMode   string // claude --permission-mode (e.g. "acceptEdits", "plan")
+	SkipPermissions  bool   // claude --dangerously-skip-permissions (headless; safe INSIDE --isolate)
+	SystemPromptFile string // claude --append-system-prompt-file: inject instructions
+	ClaudeHome       string // (--isolate) host dir mounted as the container's writable ~/.claude: skills/instructions/settings/MCP + PERSISTED session state (this is what makes resume+isolate work)
 }
 
 // Backend is a driveable agent CLI.

@@ -228,6 +228,22 @@ func claudeArgs(opts SessionOpts) []string {
 	if opts.Resume != "" {
 		args = append(args, "--resume", opts.Resume)
 	}
+	// substrate-integration passthroughs (config-file paths are target-relative)
+	if opts.MCPConfig != "" {
+		args = append(args, "--mcp-config", opts.MCPConfig)
+	}
+	if opts.AllowedTools != "" {
+		args = append(args, "--allowed-tools", opts.AllowedTools)
+	}
+	if opts.PermissionMode != "" {
+		args = append(args, "--permission-mode", opts.PermissionMode)
+	}
+	if opts.SkipPermissions {
+		args = append(args, "--dangerously-skip-permissions")
+	}
+	if opts.SystemPromptFile != "" {
+		args = append(args, "--append-system-prompt-file", opts.SystemPromptFile)
+	}
 	return args
 }
 
@@ -275,16 +291,23 @@ func claudeCmd(ctx context.Context, bin string, opts SessionOpts, claudeArgs []s
 // (read-only) — never the host. claude writes its own state to an ephemeral
 // in-container ~/.claude (gone on --rm). wd/creds are already in the target
 // platform's path form (local: forward-slashed host paths; remote: $HOME-relative).
-func dockerArgs(wd, creds, image string, claudeArgs []string) []string {
+// dockerArgs builds the `docker run …` invocation. claudeHome (if set) is mounted
+// as the container's WRITABLE ~/.claude — skills, instructions, settings, MCP, AND
+// persisted session state (so a later --resume container reattaches). The creds are
+// still layered read-only on top, so auth works without copying secrets into the home.
+func dockerArgs(wd, creds, claudeHome, image string, claudeArgs []string) []string {
 	if image == "" {
 		image = "loom-claude"
 	}
-	a := []string{
-		"docker", "run", "-i", "--rm",
-		"-v", wd + ":/work", "-w", "/work",
-		"-v", creds + ":/root/.claude/.credentials.json:ro",
-		image, "claude",
+	a := []string{"docker", "run", "-i", "--rm"}
+	if claudeHome != "" {
+		a = append(a, "-v", claudeHome+":/root/.claude")
 	}
+	a = append(a, "-v", wd+":/work", "-w", "/work")
+	if creds != "" {
+		a = append(a, "-v", creds+":/root/.claude/.credentials.json:ro")
+	}
+	a = append(a, image, "claude")
 	return append(a, claudeArgs...)
 }
 
@@ -297,20 +320,25 @@ func dockerRunArgs(opts SessionOpts, claudeArgs []string) []string {
 	}
 	home, _ := os.UserHomeDir()
 	creds := filepath.Join(home, ".claude", ".credentials.json")
-	return dockerArgs(dockerVol(wd), dockerVol(creds), opts.Image, claudeArgs)
+	claudeHome := ""
+	if opts.ClaudeHome != "" {
+		claudeHome = dockerVol(opts.ClaudeHome)
+	}
+	return dockerArgs(dockerVol(wd), dockerVol(creds), claudeHome, opts.Image, claudeArgs)
 }
 
 // remoteDockerArgs sandboxes claude on the REMOTE box (for --remote --isolate). The
 // docker command runs over ssh inside a login shell, so paths resolve THERE: $HOME
-// is expanded by the remote bash, and --dir is a remote path. The remote must have
-// docker, the loom-claude image, and an authed ~/.claude/.credentials.json. Pass
-// --dir to scope the sandbox; without it, it falls back to the remote $HOME.
+// is expanded by the remote bash, and --dir/--claude-home are remote paths. The
+// remote must have docker, the loom-claude image, and an authed
+// ~/.claude/.credentials.json. Pass --dir to scope the sandbox; without it, it falls
+// back to the remote $HOME.
 func remoteDockerArgs(opts SessionOpts, claudeArgs []string) []string {
 	wd := opts.Workdir
 	if wd == "" {
 		wd = "$HOME"
 	}
-	return dockerArgs(wd, "$HOME/.claude/.credentials.json", opts.Image, claudeArgs)
+	return dockerArgs(wd, "$HOME/.claude/.credentials.json", opts.ClaudeHome, opts.Image, claudeArgs)
 }
 
 // dockerVol normalizes a host path for a Docker bind mount (C:\path → C:/path,
