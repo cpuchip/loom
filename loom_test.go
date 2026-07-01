@@ -85,6 +85,23 @@ func TestClaudeCmd(t *testing.T) {
 	}
 }
 
+// TestClaudeArgs locks the persistent-session flags and the --resume wiring.
+func TestClaudeArgs(t *testing.T) {
+	base := strings.Join(claudeArgs(SessionOpts{}), " ")
+	for _, want := range []string{"-p", "--input-format stream-json", "--output-format stream-json", "--verbose"} {
+		if !strings.Contains(base, want) {
+			t.Errorf("base args missing %q: %s", want, base)
+		}
+	}
+	if strings.Contains(base, "--resume") || strings.Contains(base, "--model") {
+		t.Errorf("empty opts should not add --resume/--model: %s", base)
+	}
+	withResume := strings.Join(claudeArgs(SessionOpts{Model: "haiku", Resume: "sess-abc"}), " ")
+	if !strings.Contains(withResume, "--model haiku") || !strings.Contains(withResume, "--resume sess-abc") {
+		t.Errorf("resume args: %s", withResume)
+	}
+}
+
 func TestBackendsRegistry(t *testing.T) {
 	bs := Backends()
 	if _, ok := bs["claude"]; !ok {
@@ -123,4 +140,44 @@ func TestClaudeMultiTurnSmoke(t *testing.T) {
 		t.Error("expected a stable session_id")
 	}
 	t.Logf("multi-turn OK: turn2=%q session=%s cost=$%.4f", r.Text, r.SessionID, r.CostUSD)
+}
+
+// TestClaudeResumeSmoke is the durable-session oracle: process A remembers a
+// number and EXITS; a FRESH process B resumes that session by id and recalls it
+// across the restart. This is what makes a remote session survive a dropped pipe.
+// Opt-in via LOOM_SMOKE=1 (spends a little money).
+func TestClaudeResumeSmoke(t *testing.T) {
+	if os.Getenv("LOOM_SMOKE") != "1" {
+		t.Skip("set LOOM_SMOKE=1 to run the live resume smoke (spends a little money)")
+	}
+	b := ClaudeBackend{Bin: "claude"}
+	// process A: remember, capture the session id, then close (EOF → exit, saved)
+	a, err := b.Open(context.Background(), SessionOpts{Model: "haiku"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Send(context.Background(), "Remember this number: 73. Reply with just: OK"); err != nil {
+		t.Fatal(err)
+	}
+	id := a.SessionID()
+	if id == "" {
+		t.Fatal("no session id from process A")
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("close A: %v", err)
+	}
+	// process B: a FRESH backend, resume the SAME id, recall across the restart
+	c, err := b.Open(context.Background(), SessionOpts{Model: "haiku", Resume: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r, err := c.Send(context.Background(), "What number did I ask you to remember? Reply with ONLY the digits.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.Text, "73") {
+		t.Fatalf("resumed session did not recall across the process restart; got %q", r.Text)
+	}
+	t.Logf("resume OK across processes: id=%s turn=%q", id, r.Text)
 }

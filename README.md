@@ -55,6 +55,7 @@ loom panel  --agents local,claude "is this function correct?"    # cloud+local c
 loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   # review a git diff or files
 loom run    --agent claude --isolate --dir /path/to/repo "..."   # claude in a docker sandbox (host walled off)
 loom run    --agent claude --remote cpuchip@box --dir /repo "..." # claude on another machine over ssh
+loom run    --agent claude --resume <session-id> "..."           # reattach to a prior session (survives process/pipe death)
 loom agents                                                      # list backends
 ```
 
@@ -66,6 +67,32 @@ race, and an incomplete `<think>`-stripper — the orphan `</think>` case a self
 `--events` makes loom **observable** — the agent's tool calls (`→ Glob`), tool results, and thinking
 stream to stderr as they happen, while the final answer comes back on stdout. Backends emit what they
 can: `claude` the full stream, `local`/`agy` a coarse one.
+
+## Sessions — carry & resume
+
+Two different guarantees, both verified on the real path:
+
+- **Carry context across turns** (one live process): the claude backend is a single persistent
+  `claude -p --input-format stream-json … --verbose` process; each turn writes to the *same* stdin and reads
+  to that turn's `result`, so claude holds full context. That's `loom chat`. ✅ (`LOOM_SMOKE` oracle: turn 1
+  "remember 42" → turn 2 "42", one process.)
+- **Resume across a process restart / dropped pipe** (`--resume <id>`): the session persists to disk on
+  whichever box runs claude. `loom run`/`loom chat` print the `session_id`; reopen it later — even from a
+  *fresh process on another day* — with `--resume <id>`, and the context is restored. ✅ verified 2026-06-30
+  by a two-process oracle (process A remembers 73 and exits → a brand-new process B `--resume` recalls 73)
+  and the CLI end-to-end. This is what makes a **remote** session durable: a broken ssh pipe doesn't lose the
+  session — loom just reattaches by id.
+
+```sh
+loom run --agent claude "remember the number 88, reply OK"  # prints: [session <id> — resume: loom run --resume <id> ...]
+loom run --agent claude --resume <id> "what number?"         # → 88, from a brand-new process
+```
+
+Under the hood: `claude --resume <id>` (the real CLI also has `--session-id <uuid>` to *pre-assign* an id,
+`--fork-session` to branch, `-c` for most-recent — natural follow-ons). **The one honest gap:** it's
+turn-*serialized* — loom streams output live per turn (`--events`) but can't inject a message or **interrupt
+while claude is working**. Claude's stdin protocol allows it (`--replay-user-messages` acks input); loom
+doesn't expose mid-turn steering yet. That's the next thing for driving long-running (esp. remote) agents.
 
 ## Isolation — the wall (`--isolate`)
 
@@ -138,10 +165,9 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 - ✅ **Isolation (`--isolate`):** claude in a docker sandbox (`loom-claude`), host walled to `/work` + read-only creds — verified.
 - **North star:** loom = the substrate's *agent fabric* — a uniform, **walled** way to summon intelligence; its soul is running agentic harnesses (Claude Code, agy) the substrate can't run itself, safely. Axes: agency (raw model ↔ agent) × trust (local ↔ sandboxed ↔ remote).
 - ✅ **Remote (`--remote`):** ssh transport **live-verified end-to-end** (2026-06-30) — a Windows `loom.exe` drove a Claude Code agent on a remote Ubuntu box, its `→ Bash` tool-events streaming back, ~$0.12/turn. The **trust axis is complete** on the real path (direct / `--isolate` / `--remote`).
-- **★ Next:** tighter sandbox (scoped/short-lived token, egress limits); `remote+isolate` (docker on the remote); `agy --isolate`; panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
-- **Backlog:** session resume (`--resume <session_id>` for claude, `--conversation` for agy)
-  surfaced in the CLI; a condenser for very long sessions (pattern from OpenHands'
-  `LLMSummarizingCondenser`); routing/role assignment across the panel.
+- ✅ **Resume (`--resume <id>`):** durable sessions — reattach to a prior session across a process restart / dropped pipe (context restored from claude's on-disk session store). Verified 2026-06-30 by a two-process oracle + CLI e2e. The piece that makes a **remote** session survive a broken pipe.
+- **★ Next:** **mid-turn interrupt/steer** (send a message *while* claude works — turn-serialization is the last session gap, and the thing driving long-running remote agents needs); `remote+isolate` (sandboxed claude on a remote box); tighter sandbox (scoped/short-lived token, egress limits); `agy --isolate`; panel role-routing (doer→critic); the `--agent`/`--agents` flag nit + `--events` through panel.
+- **Backlog:** `--session-id`/`--fork-session` (pre-assign / branch) surfaced in the CLI; agy `--conversation` resume in the CLI; a condenser for very long sessions (pattern from OpenHands' `LLMSummarizingCondenser`); routing/role assignment across the panel.
 
 ## ACP — researched 2026-06-29, decision: skip for now
 

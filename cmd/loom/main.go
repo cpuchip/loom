@@ -62,6 +62,7 @@ func cmdRun(args []string) error {
 	events := fs.Bool("events", false, "stream tool calls + thinking to stderr")
 	isolate := fs.Bool("isolate", false, "run claude in a docker sandbox (host walled off)")
 	remote := fs.String("remote", "", "run claude on a remote box over ssh (e.g. cpuchip@host)")
+	resume := fs.String("resume", "", "resume a prior claude session by id (from an earlier run's session_id)")
 	_ = fs.Parse(args)
 	prompt := strings.Join(fs.Args(), " ")
 	if prompt == "" {
@@ -71,7 +72,7 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	sess, err := b.Open(context.Background(), loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate, Remote: *remote})
+	sess, err := b.Open(context.Background(), loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate, Remote: *remote, Resume: *resume})
 	if err != nil {
 		return err
 	}
@@ -83,6 +84,9 @@ func cmdRun(args []string) error {
 	fmt.Println(r.Text)
 	if r.CostUSD > 0 {
 		fmt.Fprintf(os.Stderr, "[%s $%.4f]\n", r.Backend, r.CostUSD)
+	}
+	if r.SessionID != "" {
+		fmt.Fprintf(os.Stderr, "[session %s — resume: loom run --resume %s ...]\n", r.SessionID, r.SessionID)
 	}
 	return nil
 }
@@ -96,12 +100,13 @@ func cmdChat(args []string) error {
 	events := fs.Bool("events", false, "stream tool calls + thinking to stderr")
 	isolate := fs.Bool("isolate", false, "run claude in a docker sandbox (host walled off)")
 	remote := fs.String("remote", "", "run claude on a remote box over ssh (e.g. cpuchip@host)")
+	resume := fs.String("resume", "", "resume a prior claude session by id (from an earlier session's id)")
 	_ = fs.Parse(args)
 	b, err := pickBackend(*agent)
 	if err != nil {
 		return err
 	}
-	sess, err := b.Open(context.Background(), loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate, Remote: *remote})
+	sess, err := b.Open(context.Background(), loom.SessionOpts{Workdir: *dir, Model: *model, Isolate: *isolate, Remote: *remote, Resume: *resume})
 	if err != nil {
 		return err
 	}
@@ -122,6 +127,9 @@ func cmdChat(args []string) error {
 		if r.CostUSD > 0 {
 			fmt.Fprintf(os.Stderr, "[%s $%.4f this turn]\n", r.Backend, r.CostUSD)
 		}
+	}
+	if id := sess.SessionID(); id != "" {
+		fmt.Fprintf(os.Stderr, "[session %s — resume: loom chat --resume %s]\n", id, id)
 	}
 	return in.Err()
 }

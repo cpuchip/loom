@@ -52,17 +52,7 @@ func (s *claudeSession) ensureStarted(ctx context.Context) error {
 	if s.started {
 		return nil
 	}
-	// --verbose is REQUIRED with --print + --output-format stream-json.
-	args := []string{
-		"-p",
-		"--input-format", "stream-json",
-		"--output-format", "stream-json",
-		"--verbose",
-	}
-	if s.opts.Model != "" {
-		args = append(args, "--model", s.opts.Model)
-	}
-	cmd := claudeCmd(ctx, s.bin, s.opts, args)
+	cmd := claudeCmd(ctx, s.bin, s.opts, claudeArgs(s.opts))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -165,6 +155,27 @@ func emitClaudeContent(onEvent func(Event), ev map[string]any) {
 			emit(onEvent, Event{Kind: EvToolResult, Backend: "claude"})
 		}
 	}
+}
+
+// claudeArgs builds the persistent-session flags. --verbose is REQUIRED with
+// --print + --output-format stream-json. --resume <id> reattaches to a prior
+// session by id (context restored from the session store on whichever box runs
+// claude) — the piece that lets a session survive a process restart or a dropped
+// remote pipe: run once, keep the Reply.SessionID, reopen with Resume set.
+func claudeArgs(opts SessionOpts) []string {
+	args := []string{
+		"-p",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+	}
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
+	if opts.Resume != "" {
+		args = append(args, "--resume", opts.Resume)
+	}
+	return args
 }
 
 // claudeCmd builds the transport chain for a claude invocation — the trust axis:
