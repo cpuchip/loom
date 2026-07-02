@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/cpuchip/loom"
@@ -48,6 +49,12 @@ func main() {
 		err = cmdPanel(os.Args[2:])
 	case "review":
 		err = cmdReview(os.Args[2:])
+	case "send":
+		err = cmdSend(os.Args[2:])
+	case "await":
+		err = cmdAwait(os.Args[2:])
+	case "sessions":
+		err = cmdSessions(os.Args[2:])
 	case "serve":
 		err = cmdServe(os.Args[2:])
 	case "agents":
@@ -80,7 +87,7 @@ type sessFlags struct {
 	agent, model, dir, remote, resume *string
 	mcpConfig, allowedTools, permMode *string
 	sysPromptFile, claudeHome         *string
-	connect, token                    *string
+	connect, token, session           *string
 	events, isolate, skipPerms, json  *bool
 }
 
@@ -101,6 +108,7 @@ func addSessionFlags(fs *flag.FlagSet) *sessFlags {
 		claudeHome:    fs.String("claude-home", "", "(--isolate) host dir mounted as the container's ~/.claude: skills/instructions/settings/MCP + PERSISTED sessions (enables resume+isolate)"),
 		connect:       fs.String("connect", "", "drive a remote `loom serve` over websocket (ws://host:port) — the --agent/opts are opened THERE"),
 		token:         fs.String("token", "", "auth token for --connect"),
+		session:       fs.String("session", "", "(--connect) reattach a warm resident by this stable NAME — a second use reuses the live process, no respawn/cold-read"),
 		json:          fs.Bool("json", false, "emit the Reply as JSON to stdout (for programmatic/subprocess callers)"),
 	}
 }
@@ -109,7 +117,7 @@ func addSessionFlags(fs *flag.FlagSet) *sessFlags {
 // opens --agent with these opts), else to a local backend by name.
 func chooseBackend(sf *sessFlags) (loom.Backend, error) {
 	if *sf.connect != "" {
-		return loom.ConnectBackend{URL: *sf.connect, Token: *sf.token, Agent: *sf.agent}, nil
+		return loom.ConnectBackend{URL: *sf.connect, Token: *sf.token, Agent: *sf.agent, SessionName: *sf.session}, nil
 	}
 	return pickBackend(*sf.agent)
 }
@@ -187,6 +195,146 @@ func cmdChat(args []string) error {
 		fmt.Fprintf(os.Stderr, "[session %s — resume: loom chat --resume %s]\n", id, id)
 	}
 	return in.Err()
+}
+
+// send: reattach (or first-open) a warm resident by name over --connect and send one
+// turn. --detach starts the turn and returns a turn-id immediately (fetch the reply
+// later with `loom await`) — so a minutes-long turn need not pin this process. Without
+// --detach it streams + prints the reply like `run`, but leaves the resident warm.
+func cmdSend(args []string) error {
+	fs := flag.NewFlagSet("send", flag.ExitOnError)
+	sf := addSessionFlags(fs)
+	detach := fs.Bool("detach", false, "start the turn detached — return a turn-id at once, fetch the reply with `loom await`")
+	_ = fs.Parse(args)
+	prompt := strings.Join(fs.Args(), " ")
+	if prompt == "" {
+		return fmt.Errorf("send: need a message")
+	}
+	if *sf.connect == "" {
+		return fmt.Errorf("send: --connect ws://host:port is required (send drives a `loom serve`)")
+	}
+	if *sf.session == "" {
+		return fmt.Errorf("send: --session <name> is required (the warm resident to reattach)")
+	}
+	b, err := chooseBackend(sf)
+	if err != nil {
+		return err
+	}
+	sess, err := b.Open(context.Background(), sf.opts())
+	if err != nil {
+		return err
+	}
+	defer sess.Close() // named → leaves the resident warm for the next drive
+	if *detach {
+		ds, ok := sess.(loom.DetachSession)
+		if !ok {
+			return fmt.Errorf("send: --detach needs --connect (a serve session)")
+		}
+		id, err := ds.SendDetached(context.Background(), prompt)
+		if err != nil {
+			return err
+		}
+		if *sf.json {
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{"turn_id": id, "status": "running"})
+		}
+		fmt.Println(id)
+		fmt.Fprintf(os.Stderr, "[detached turn %d — fetch: loom await --connect %s --token … --session %s --turn %d]\n", id, *sf.connect, *sf.session, id)
+		return nil
+	}
+	r, err := sendTurn(sess, prompt, *sf.events)
+	if err != nil {
+		return err
+	}
+	return emitReply(r, *sf.json)
+}
+
+// await: fetch a detached (or dropped) turn's reply from a warm resident's reply ring.
+// It reattaches by name WITHOUT spawning (attach-only), so polling never creates a
+// session. --last-reply fetches the most recent turn when the turn-id isn't known.
+func cmdAwait(args []string) error {
+	fs := flag.NewFlagSet("await", flag.ExitOnError)
+	connect := fs.String("connect", "", "the `loom serve` endpoint (ws://host:port)")
+	token := fs.String("token", "", "auth token for --connect")
+	agent := fs.String("agent", "claude", "backend the session runs on (matches the original open)")
+	session := fs.String("session", "", "the warm resident's name")
+	turn := fs.Int64("turn", 0, "the turn-id returned by `loom send --detach`")
+	lastReply := fs.Bool("last-reply", false, "fetch the most recent turn (when the turn-id isn't known)")
+	timeout := fs.Int("timeout", 30, "seconds to block waiting for the turn to finish before reporting it's still running")
+	jsonOut := fs.Bool("json", false, "emit the Reply as JSON to stdout")
+	_ = fs.Parse(args)
+	if *connect == "" || *session == "" {
+		return fmt.Errorf("await: --connect and --session are required")
+	}
+	if *turn == 0 && !*lastReply {
+		return fmt.Errorf("await: need --turn <id> or --last-reply")
+	}
+	b := loom.ConnectBackend{URL: *connect, Token: *token, Agent: *agent, SessionName: *session, AttachOnly: true}
+	sess, err := b.Open(context.Background(), loom.SessionOpts{})
+	if err != nil {
+		return err
+	}
+	defer sess.Close() // named → leaves the resident warm
+	ds, ok := sess.(loom.DetachSession)
+	if !ok {
+		return fmt.Errorf("await: session does not support await (needs --connect)")
+	}
+	r, running, err := ds.Await(context.Background(), *turn, *lastReply, time.Duration(*timeout)*time.Second)
+	if err != nil {
+		return err
+	}
+	if running {
+		if *jsonOut {
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{"turn_id": *turn, "status": "running"})
+		}
+		fmt.Fprintf(os.Stderr, "[turn still running — poll again: loom await … --turn %d]\n", *turn)
+		return nil
+	}
+	return emitReply(r, *jsonOut)
+}
+
+// sessions: list the warm residents a `loom serve` holds — name, backend, frozen opts,
+// idle time, last turn-id — so you know what to reattach.
+func cmdSessions(args []string) error {
+	fs := flag.NewFlagSet("sessions", flag.ExitOnError)
+	connect := fs.String("connect", "", "the `loom serve` endpoint (ws://host:port)")
+	token := fs.String("token", "", "auth token for --connect")
+	jsonOut := fs.Bool("json", false, "emit the list as JSON to stdout")
+	_ = fs.Parse(args)
+	if *connect == "" {
+		return fmt.Errorf("sessions: --connect ws://host:port is required")
+	}
+	infos, err := loom.ConnectBackend{URL: *connect, Token: *token}.Sessions(context.Background())
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(infos)
+	}
+	if len(infos) == 0 {
+		fmt.Println("(no resident sessions)")
+		return nil
+	}
+	for _, in := range infos {
+		name := in.Name
+		if name == "" {
+			name = "(unnamed)"
+		}
+		fmt.Printf("%s\t%s\tidle=%ds\tlast_turn=%d", name, in.Backend, in.IdleSeconds, in.LastTurnID)
+		if in.Model != "" {
+			fmt.Printf("\tmodel=%s", in.Model)
+		}
+		if in.PermissionMode != "" {
+			fmt.Printf("\tperm=%s", in.PermissionMode)
+		}
+		if in.Dir != "" {
+			fmt.Printf("\tdir=%s", in.Dir)
+		}
+		if in.KeepAlive {
+			fmt.Printf("\tkeep-alive")
+		}
+		fmt.Println()
+	}
+	return nil
 }
 
 // panel: fan one prompt across several agents (the council pattern).
@@ -294,6 +442,7 @@ func cmdServe(args []string) error {
 	listen := fs.String("listen", "127.0.0.1:7777", "bind address (a mesh IP:port — do NOT use 0.0.0.0 without TLS)")
 	tokenFile := fs.String("token-file", "", "newline-delimited token file that gates clients (required)")
 	addToken := fs.Bool("add-token", false, "mint a token, append it to --token-file, print it, and exit")
+	idleTTL := fs.Duration("idle-ttl", 4*time.Hour, "downgrade a named resident idle longer than this to cold-resumable (closed, lineage remembered); 0 = never")
 	_ = fs.Parse(args)
 	if *tokenFile == "" {
 		return fmt.Errorf("serve: --token-file is required")
@@ -307,7 +456,7 @@ func cmdServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "[token appended to %s — a client drives this box with:\n  loom run --connect ws://<this-box>:<port> --token %s ...]\n", *tokenFile, tok)
 		return nil
 	}
-	return loom.Serve(*listen, *tokenFile, loom.Backends())
+	return loom.Serve(*listen, *tokenFile, loom.Backends(), *idleTTL)
 }
 
 func backendsFromList(list string) ([]loom.Backend, error) {
@@ -446,9 +595,16 @@ usage:
   loom chat  --agent claude [--model M] [--dir D]              multi-turn (one msg per stdin line)
   loom panel  --agents claude,agy [--dir D] "prompt"           fan one prompt across agents (council)
   loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   review a diff or files
-  loom serve --listen 127.0.0.1:7777 --token-file ~/.loom/tokens [--add-token]   run loom as a ws service
+  loom serve --listen 127.0.0.1:7777 --token-file ~/.loom/tokens [--add-token] [--idle-ttl 4h]   run loom as a ws service
   loom agents                                                  list backends
 
-  --connect ws://host:port --token T   (on run/chat) drive a remote loom serve over websocket —
-                                       the --agent/--model/--dir/--resume/opts are opened THERE`)
+  warm-resident (over --connect): keep a claude process resident + warm and reattach by NAME —
+  the first open cold-reads once, every later drive is a cache-warm reattach.
+  loom send    --connect ws://host:port --token T --session NAME [--detach] "msg"   reattach-or-open, send
+  loom await   --connect ws://host:port --token T --session NAME --turn ID [--last-reply] [--timeout S]  fetch a detached reply
+  loom sessions --connect ws://host:port --token T             list resident sessions
+
+  --connect ws://host:port --token T   (on run/chat/send) drive a remote loom serve over websocket —
+                                       the --agent/--model/--dir/--resume/opts are opened THERE
+  --session NAME                       (on run/chat/send) reattach a warm resident by name (no respawn)`)
 }

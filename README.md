@@ -207,6 +207,52 @@ loom as the substrate's hands: reach (dir), voice back (MCP hinge), wall (isolat
 **Full integration guide** — a copy-in contract for a backend driving loom (subprocess model, the two walls,
 the canonical dispatch, prereqs, council note): [`docs/pg-ai-stewards-integration.md`](docs/pg-ai-stewards-integration.md).
 
+## Serve — loom as a service (`loom serve`) + warm-resident sessions
+
+`loom serve` runs loom as a websocket service: a client (another loom, a browser) drives sessions over a
+socket with a token instead of spawning subprocesses/ssh. It's the fourth transport (`--connect ws://…`),
+honoring the same `Backend`/`Session`/`Interruptible` interfaces — so `run`/`chat`/`review` work unchanged
+over the wire. There is no TLS yet: bind a mesh IP (e.g. NetBird `100.x`), never `0.0.0.0`.
+
+```sh
+loom serve --token-file ~/.loom/tokens --add-token         # mint a token (first run)
+loom serve --listen 100.x.y.z:7777 --token-file ~/.loom/tokens [--idle-ttl 4h]
+```
+
+**The warm-resident upgrade (the cheap round).** A round — home implements → a remote box verifies over the
+socket — used to respawn claude and *cold-read the whole session* every drive (dollars per turn on a big
+session). Now a session opened under a stable **name** stays resident and warm; a later open of that name
+**reattaches** to the live process instead of respawning. First open cold-reads once; every later drive is a
+cache-warm reattach.
+
+```sh
+# reattach-or-open by name, send a turn, leave the resident warm for the next drive:
+loom send --connect ws://100.x.y.z:7777 --token T --session verify-loop "verify feat/x @ <sha>"
+
+# a minutes-long turn, detached — returns a turn-id at once; fetch the verdict later:
+loom send  --connect … --token T --session verify-loop --detach "build + re-extract + report"   # → 7
+loom await --connect … --token T --session verify-loop --turn 7 [--timeout 60]                   # blocks then returns the reply
+loom await --connect … --token T --session verify-loop --last-reply                              # most recent turn, id unknown
+
+loom sessions --connect … --token T   # list residents: name, backend, frozen opts, idle, last turn-id
+```
+
+`run`/`chat` also take `--session <name>` over `--connect` (a warm drive from discrete tool calls). The
+design guarantees, all hermetically tested (`serve_test.go`, no live claude / no cost):
+
+- **Name-keyed, id-agnostic** — keyed on the client-chosen name, never claude's session id (which forks on
+  every cold resume). **Two-writer fence:** a name that's resident reattaches; a second process is never
+  spawned against one lineage (opens serialize; opts froze at first open — a reattach with conflicting opts
+  reattaches and notes it).
+- **Per-turn reply ring** — the last few replies are buffered by turn-id, so a socket that drops mid-turn
+  loses no verdict: reconnect (open the same name) and `await` it.
+- **`send --detach` / `await`** — a long turn runs without a synchronous client pinned to it.
+- **Idle TTL** — a resident idle past `--idle-ttl` (default 4h; `0` = never) is *downgraded*: its process is
+  closed but its evolved lineage id is remembered, so the next open of the name cold-resumes it — one
+  cold-read, never lost data.
+
+An `open` without a name is unchanged: ephemeral, dropped on disconnect (unless `keep_alive`).
+
 ### Test
 
 ```sh
@@ -230,6 +276,7 @@ LOOM_SMOKE=1 go test ./...    # + the live claude multi-turn oracle (spends a li
 - ✅ **The substrate hinge (config surface):** `--mcp-config` (wire the substrate MCP into the agent — reads/writes back), `--allowed-tools` (capability wall), `--skip-permissions` (headless, safe in `--isolate`), `--system-prompt-file` (instructions), and `--claude-home` (the container's `~/.claude`: skills/instructions/settings + **persisted sessions → resume+isolate now works**, live-verified). loom can now drive claude as a *configured* substrate worker, not just a chat.
 - ✅ **`--json` output + integration guide:** `--json` emits the `Reply` as one stdout line (the clean "pull" channel for subprocess callers; events stay on stderr). Full contract in [`docs/pg-ai-stewards-integration.md`](docs/pg-ai-stewards-integration.md) — subprocess model, the two walls, exfil channels (bind-mount / MCP / git / stdout), push-vs-pull data flow, the canonical dispatch.
 - ✅ **Proven by the substrate + non-root image fix (2026-07-01):** pg-ai-stewards ran the first real substrate→loom dispatch (pull-only, direct mode: claude read a corpus, wrote `findings.md` back, clean `--json` Reply). It surfaced one real bug — the `loom-claude` image ran claude as **root**, which Claude Code refuses for `--dangerously-skip-permissions`. Fixed: the image now runs as non-root `node` (mounts at `/home/node/.claude`); `isolate + --skip-permissions` live-verified. **Autonomous isolated headless dispatch is unblocked.**
+- ✅ **Serve + warm-resident (`loom serve` / `--connect`):** loom as a websocket service (token-gated, mesh-only, no TLS yet). Name-keyed **resident sessions** reattach to a live warm process instead of respawning + cold-reading (the cheap round); a **two-writer fence**, a **per-turn reply ring** (recover a dropped mid-turn verdict), **`send --detach`/`await`** for minutes-long turns, `loom sessions`, and an **idle TTL** that downgrades to cold-resumable (lineage remembered, never lost). Hermetically tested (`serve_test.go`, `-race`, no live cost); live cheap-warm-round proof is Michael's.
 - **★ Next:** the first real `pg-ai-stewards → loom run --isolate --mcp-config …` dispatch (the viability test); tighter sandbox (scoped/short-lived token, egress limits — toward zero-trust); `agy --isolate`; panel role-routing (doer→critic).
 - **Backlog:** `--session-id`/`--fork-session` (pre-assign / branch) surfaced in the CLI; agy `--conversation` resume in the CLI; a condenser for very long sessions (pattern from OpenHands' `LLMSummarizingCondenser`); routing/role assignment across the panel.
 
