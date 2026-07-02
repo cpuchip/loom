@@ -89,6 +89,7 @@ type sessFlags struct {
 	sysPromptFile, claudeHome         *string
 	connect, token, session           *string
 	events, isolate, skipPerms, json  *bool
+	consult                           *bool
 }
 
 func addSessionFlags(fs *flag.FlagSet) *sessFlags {
@@ -104,6 +105,7 @@ func addSessionFlags(fs *flag.FlagSet) *sessFlags {
 		allowedTools:  fs.String("allowed-tools", "", "claude --allowed-tools: scope which tools (incl. MCP) the agent may call"),
 		permMode:      fs.String("permission-mode", "", "claude --permission-mode (e.g. acceptEdits, plan)"),
 		skipPerms:     fs.Bool("skip-permissions", false, "claude --dangerously-skip-permissions (headless; safe only INSIDE --isolate)"),
+		consult:       fs.Bool("consult", false, "read-only consult: inject an answer-don't-act directive so a QUESTION drive doesn't sprawl into edits/commits/journaling"),
 		sysPromptFile: fs.String("system-prompt-file", "", "claude --append-system-prompt-file: inject instructions"),
 		claudeHome:    fs.String("claude-home", "", "(--isolate) host dir mounted as the container's ~/.claude: skills/instructions/settings/MCP + PERSISTED sessions (enables resume+isolate)"),
 		connect:       fs.String("connect", "", "drive a remote `loom serve` over websocket (ws://host:port) — the --agent/opts are opened THERE"),
@@ -127,6 +129,7 @@ func (sf *sessFlags) opts() loom.SessionOpts {
 		Workdir: *sf.dir, Model: *sf.model, Isolate: *sf.isolate, Remote: *sf.remote, Resume: *sf.resume,
 		MCPConfig: *sf.mcpConfig, AllowedTools: *sf.allowedTools, PermissionMode: *sf.permMode,
 		SkipPermissions: *sf.skipPerms, SystemPromptFile: *sf.sysPromptFile, ClaudeHome: *sf.claudeHome,
+		Consult: *sf.consult,
 	}
 }
 

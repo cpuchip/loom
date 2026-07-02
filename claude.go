@@ -244,8 +244,22 @@ func claudeArgs(opts SessionOpts) []string {
 	if opts.SystemPromptFile != "" {
 		args = append(args, "--append-system-prompt-file", opts.SystemPromptFile)
 	}
+	// Consult mode: a read-only "answer, don't act" frame injected at the system-prompt
+	// layer (once, persists across turns) so a QUESTION drive can't sprawl into edits,
+	// commits, or journaling — the observed failure mode of a headless skip-permissions
+	// drive treating a question as a work order. Instruction-level, not a hard sandbox;
+	// pair with --allowed-tools for enforcement.
+	if opts.Consult {
+		args = append(args, "--append-system-prompt", consultDirective)
+	}
 	return args
 }
+
+// consultDirective frames a read-only consult drive (see SessionOpts.Consult).
+const consultDirective = "CONSULT MODE (read-only). You are being consulted for an ANSWER, not for changes. " +
+	"Do NOT edit or create files, run state-mutating commands, git commit/push, or write journal/memory/notes. " +
+	"Use read-only tools to investigate, then answer the question directly and concisely. " +
+	"If a correct answer would require making changes, DESCRIBE the changes you would make instead of making them."
 
 // claudeCmd builds the transport chain for a claude invocation — the trust axis:
 //
@@ -279,11 +293,47 @@ func claudeCmd(ctx context.Context, bin string, opts SessionOpts, claudeArgs []s
 		a := dockerRunArgs(opts, claudeArgs)
 		return exec.CommandContext(ctx, a[0], a[1:]...)
 	}
-	cmd := exec.CommandContext(ctx, bin, claudeArgs...)
+	// Direct local spawn — resolve claude robustly. A detached daemon (loom serve)
+	// often runs with a PATH that misses ~/.local/bin (where the installer/npm-global
+	// put claude), so a bare exec("claude") fails "executable file not found" even
+	// though claude works in an interactive shell. (remote resolves PATH in the far
+	// login shell; isolate uses the image — only this branch is exposed.)
+	cmd := exec.CommandContext(ctx, resolveClaudeBin(bin), claudeArgs...)
 	if opts.Workdir != "" {
 		cmd.Dir = opts.Workdir
 	}
 	return cmd
+}
+
+// resolveClaudeBin finds the claude executable for a LOCAL direct spawn. Order:
+// an explicit LOOM_CLAUDE_BIN override, a path-y bin used as given, a PATH lookup,
+// then the common install locations a detached daemon's PATH tends to miss. Falls
+// back to the input so the normal "not found" error still surfaces if truly absent.
+func resolveClaudeBin(bin string) string {
+	if env := os.Getenv("LOOM_CLAUDE_BIN"); env != "" {
+		return env
+	}
+	if bin == "" {
+		bin = "claude"
+	}
+	if strings.ContainsAny(bin, `/\`) { // an explicit path — trust it as given
+		return bin
+	}
+	if p, err := exec.LookPath(bin); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	for _, c := range []string{
+		filepath.Join(home, ".local", "bin", bin),
+		filepath.Join(home, "bin", bin),
+		"/usr/local/bin/" + bin,
+		"/opt/homebrew/bin/" + bin,
+	} {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return bin // let exec surface the standard not-found error
 }
 
 // dockerArgs builds `docker run -i … <image> claude <args>` so the agent is

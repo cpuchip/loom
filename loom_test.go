@@ -63,9 +63,11 @@ func TestClaudeCmd(t *testing.T) {
 	ctx := context.Background()
 	args := []string{"-p", "--input-format", "stream-json"}
 
-	// direct: claude … with cwd = Workdir
+	// direct: claude … with cwd = Workdir. args0 is resolveClaudeBin("claude"), so it's
+	// either "claude" (not installed on this box) or a resolved path ending in
+	// claude / claude.exe — either way its basename is claude.
 	c := claudeCmd(ctx, "claude", SessionOpts{Workdir: "/repo"}, args)
-	if c.Args[0] != "claude" || c.Dir != "/repo" {
+	if !strings.Contains(strings.ToLower(c.Args[0]), "claude") || c.Dir != "/repo" {
 		t.Errorf("direct: args0=%q dir=%q", c.Args[0], c.Dir)
 	}
 

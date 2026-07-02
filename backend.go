@@ -35,6 +35,7 @@ type SessionOpts struct {
 	SkipPermissions  bool   // claude --dangerously-skip-permissions (headless; safe INSIDE --isolate)
 	SystemPromptFile string // claude --append-system-prompt-file: inject instructions
 	ClaudeHome       string // (--isolate) host dir mounted as the container's writable ~/.claude: skills/instructions/settings/MCP + PERSISTED session state (this is what makes resume+isolate work)
+	Consult          bool   // read-only "consult" drive: inject a directive so a QUESTION drive doesn't sprawl into edits/commits/journaling (instruction-level, not a hard sandbox — use AllowedTools for enforcement)
 }
 
 // Backend is a driveable agent CLI.
