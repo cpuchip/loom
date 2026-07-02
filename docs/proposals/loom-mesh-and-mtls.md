@@ -1,9 +1,19 @@
 # loom mesh + mTLS — council plan
 
-**Status:** council-pending. Michael's load-bearing shapes captured 2026-07-01
-(decision-fatigued after a hard week+half — he gave the shapes he knew and asked
-me to hold the rest). This doc is the durable capture + the resolved synthesis,
-so nothing evaporates. **Ratify when rested; do not build off this until then.**
+**Status: RATIFIED 2026-07-02.** Michael ratified mTLS with one binding constraint:
+
+> **★ The meshing hub must remain GENERIC — no hardcoded cpuchip endpoint.** An
+> adopter who runs loom must NEVER be pointed at `cpuchip.net` (or any of our
+> infrastructure). The hub address is BYO / configuration, always; there is no
+> baked-in default hub. loom is public MIT — a self-hoster stands up their OWN hub
+> (or runs pure P2P with no hub at all). Our hub, if we run one, is just *a*
+> deployment of the generic thing, wired via config like anyone else's. This is a
+> build-time acceptance test: grep the binary/defaults for any cpuchip/ibeco host
+> and there must be none.
+
+Shapes captured 2026-07-01 (he was decision-fatigued; I held them). Now cleared to
+build. Sequencing note still applies: mesh-IP bind + SAS/mTLS first, hub last (and
+only when node count makes pairwise pairing tedious).
 
 The vision, in Michael's words: *"fire this up on a whim and let any of my claude
 sessions on any box work any other claude session on another box — or the same
@@ -60,7 +70,13 @@ Layered — each tool for its situation, which honors "both, but sequenced":
   nodes and pairwise-tapping is tedious, a loom-hub issues/revokes certs and holds
   the roster (mint a join token, see peers, revoke one). Reuses the exact machinery
   llama-hub already has, pointed at certs instead of bearer tokens. This is where
-  the cert-lifecycle operational weight belongs.
+  the cert-lifecycle operational weight belongs. **★ GENERIC BY CONSTRAINT (Michael,
+  2026-07-02):** the hub is `cmd/loom-hub` shipped with NO default host — you point
+  loom at a hub with `--hub https://your-host` (or enroll pure-P2P with none). Zero
+  cpuchip/ibeco endpoints anywhere in the shipped binary or its defaults. Our own
+  hub is just one deployment of this generic thing. (llama-hub is the shape to copy,
+  NOT the host to point at — llama-chip already keeps its control-plane host in
+  config for exactly this reason.)
 
 Net: **SAS-pairing for whim-P2P, token for headless bootstrap, hub-CA for scale.**
 
