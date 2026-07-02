@@ -48,6 +48,8 @@ func main() {
 		err = cmdPanel(os.Args[2:])
 	case "review":
 		err = cmdReview(os.Args[2:])
+	case "serve":
+		err = cmdServe(os.Args[2:])
 	case "agents":
 		for name := range loom.Backends() {
 			fmt.Println(name)
@@ -78,6 +80,7 @@ type sessFlags struct {
 	agent, model, dir, remote, resume *string
 	mcpConfig, allowedTools, permMode *string
 	sysPromptFile, claudeHome         *string
+	connect, token                    *string
 	events, isolate, skipPerms, json  *bool
 }
 
@@ -96,8 +99,19 @@ func addSessionFlags(fs *flag.FlagSet) *sessFlags {
 		skipPerms:     fs.Bool("skip-permissions", false, "claude --dangerously-skip-permissions (headless; safe only INSIDE --isolate)"),
 		sysPromptFile: fs.String("system-prompt-file", "", "claude --append-system-prompt-file: inject instructions"),
 		claudeHome:    fs.String("claude-home", "", "(--isolate) host dir mounted as the container's ~/.claude: skills/instructions/settings/MCP + PERSISTED sessions (enables resume+isolate)"),
+		connect:       fs.String("connect", "", "drive a remote `loom serve` over websocket (ws://host:port) — the --agent/opts are opened THERE"),
+		token:         fs.String("token", "", "auth token for --connect"),
 		json:          fs.Bool("json", false, "emit the Reply as JSON to stdout (for programmatic/subprocess callers)"),
 	}
+}
+
+// chooseBackend routes to the ws transport when --connect is set (the remote server
+// opens --agent with these opts), else to a local backend by name.
+func chooseBackend(sf *sessFlags) (loom.Backend, error) {
+	if *sf.connect != "" {
+		return loom.ConnectBackend{URL: *sf.connect, Token: *sf.token, Agent: *sf.agent}, nil
+	}
+	return pickBackend(*sf.agent)
 }
 
 func (sf *sessFlags) opts() loom.SessionOpts {
@@ -117,7 +131,7 @@ func cmdRun(args []string) error {
 	if prompt == "" {
 		return fmt.Errorf("run: need a prompt")
 	}
-	b, err := pickBackend(*sf.agent)
+	b, err := chooseBackend(sf)
 	if err != nil {
 		return err
 	}
@@ -144,7 +158,7 @@ func cmdChat(args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	sf := addSessionFlags(fs)
 	_ = fs.Parse(args)
-	b, err := pickBackend(*sf.agent)
+	b, err := chooseBackend(sf)
 	if err != nil {
 		return err
 	}
@@ -271,6 +285,29 @@ func cmdReview(args []string) error {
 		}
 	}
 	return nil
+}
+
+// serve: run loom as a websocket service — a client (another loom, a browser) drives
+// sessions over a socket with a token, instead of spawning subprocesses / ssh.
+func cmdServe(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	listen := fs.String("listen", "127.0.0.1:7777", "bind address (a mesh IP:port — do NOT use 0.0.0.0 without TLS)")
+	tokenFile := fs.String("token-file", "", "newline-delimited token file that gates clients (required)")
+	addToken := fs.Bool("add-token", false, "mint a token, append it to --token-file, print it, and exit")
+	_ = fs.Parse(args)
+	if *tokenFile == "" {
+		return fmt.Errorf("serve: --token-file is required")
+	}
+	if *addToken {
+		tok, err := loom.AddToken(*tokenFile)
+		if err != nil {
+			return err
+		}
+		fmt.Println(tok)
+		fmt.Fprintf(os.Stderr, "[token appended to %s — a client drives this box with:\n  loom run --connect ws://<this-box>:<port> --token %s ...]\n", *tokenFile, tok)
+		return nil
+	}
+	return loom.Serve(*listen, *tokenFile, loom.Backends())
 }
 
 func backendsFromList(list string) ([]loom.Backend, error) {
@@ -409,5 +446,9 @@ usage:
   loom chat  --agent claude [--model M] [--dir D]              multi-turn (one msg per stdin line)
   loom panel  --agents claude,agy [--dir D] "prompt"           fan one prompt across agents (council)
   loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   review a diff or files
-  loom agents                                                  list backends`)
+  loom serve --listen 127.0.0.1:7777 --token-file ~/.loom/tokens [--add-token]   run loom as a ws service
+  loom agents                                                  list backends
+
+  --connect ws://host:port --token T   (on run/chat) drive a remote loom serve over websocket —
+                                       the --agent/--model/--dir/--resume/opts are opened THERE`)
 }
