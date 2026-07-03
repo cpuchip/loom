@@ -57,6 +57,8 @@ func main() {
 		err = cmdSessions(os.Args[2:])
 	case "serve":
 		err = cmdServe(os.Args[2:])
+	case "pair":
+		err = cmdPair(os.Args[2:])
 	case "agents":
 		for name := range loom.Backends() {
 			fmt.Println(name)
@@ -87,7 +89,7 @@ type sessFlags struct {
 	agent, model, dir, remote, resume *string
 	mcpConfig, allowedTools, permMode *string
 	sysPromptFile, claudeHome         *string
-	connect, token, session           *string
+	connect, token, session, peer     *string
 	events, isolate, skipPerms, json  *bool
 	consult                           *bool
 }
@@ -108,8 +110,9 @@ func addSessionFlags(fs *flag.FlagSet) *sessFlags {
 		consult:       fs.Bool("consult", false, "read-only consult: inject an answer-don't-act directive so a QUESTION drive doesn't sprawl into edits/commits/journaling"),
 		sysPromptFile: fs.String("system-prompt-file", "", "claude --append-system-prompt-file: inject instructions"),
 		claudeHome:    fs.String("claude-home", "", "(--isolate) host dir mounted as the container's ~/.claude: skills/instructions/settings/MCP + PERSISTED sessions (enables resume+isolate)"),
-		connect:       fs.String("connect", "", "drive a remote `loom serve` over websocket (ws://host:port) — the --agent/opts are opened THERE"),
+		connect:       fs.String("connect", "", "drive a remote `loom serve` over websocket (ws://host:port, or wss://host:port for pinned mTLS) — the --agent/opts are opened THERE"),
 		token:         fs.String("token", "", "auth token for --connect"),
+		peer:          fs.String("peer", "", "(--connect wss://) the pinned peer name you paired with (loom pair)"),
 		session:       fs.String("session", "", "(--connect) reattach a warm resident by this stable NAME — a second use reuses the live process, no respawn/cold-read"),
 		json:          fs.Bool("json", false, "emit the Reply as JSON to stdout (for programmatic/subprocess callers)"),
 	}
@@ -119,9 +122,33 @@ func addSessionFlags(fs *flag.FlagSet) *sessFlags {
 // opens --agent with these opts), else to a local backend by name.
 func chooseBackend(sf *sessFlags) (loom.Backend, error) {
 	if *sf.connect != "" {
-		return loom.ConnectBackend{URL: *sf.connect, Token: *sf.token, Agent: *sf.agent, SessionName: *sf.session}, nil
+		return makeConnectBackend(*sf.connect, *sf.token, *sf.agent, *sf.session, *sf.peer, false)
 	}
 	return pickBackend(*sf.agent)
+}
+
+// makeConnectBackend builds the ws transport, loading this node's identity + pin store
+// when the URL is wss:// (pinned mTLS). A wss:// URL requires --peer — the name of the
+// pinned server you paired with — so we dial into a KNOWN cert, never trust-on-first-use.
+// A ws:// URL ignores all of that (plaintext on the encrypted mesh).
+func makeConnectBackend(url, token, agent, session, peer string, attachOnly bool) (loom.ConnectBackend, error) {
+	cb := loom.ConnectBackend{URL: url, Token: token, Agent: agent, SessionName: session, AttachOnly: attachOnly, Peer: peer}
+	if strings.HasPrefix(url, "wss://") {
+		if peer == "" {
+			return cb, fmt.Errorf("--connect wss:// requires --peer <name> (the pinned peer you paired with via `loom pair`)")
+		}
+		id, err := loom.LoadOrCreateIdentity("")
+		if err != nil {
+			return cb, fmt.Errorf("load identity: %w", err)
+		}
+		pins, err := loom.LoadPinStore("")
+		if err != nil {
+			return cb, fmt.Errorf("load pins: %w", err)
+		}
+		cb.Identity = id
+		cb.Pins = pins
+	}
+	return cb, nil
 }
 
 func (sf *sessFlags) opts() loom.SessionOpts {
@@ -256,8 +283,9 @@ func cmdSend(args []string) error {
 // session. --last-reply fetches the most recent turn when the turn-id isn't known.
 func cmdAwait(args []string) error {
 	fs := flag.NewFlagSet("await", flag.ExitOnError)
-	connect := fs.String("connect", "", "the `loom serve` endpoint (ws://host:port)")
+	connect := fs.String("connect", "", "the `loom serve` endpoint (ws://host:port, or wss:// for pinned mTLS)")
 	token := fs.String("token", "", "auth token for --connect")
+	peer := fs.String("peer", "", "(wss://) the pinned peer name you paired with")
 	agent := fs.String("agent", "claude", "backend the session runs on (matches the original open)")
 	session := fs.String("session", "", "the warm resident's name")
 	turn := fs.Int64("turn", 0, "the turn-id returned by `loom send --detach`")
@@ -271,7 +299,10 @@ func cmdAwait(args []string) error {
 	if *turn == 0 && !*lastReply {
 		return fmt.Errorf("await: need --turn <id> or --last-reply")
 	}
-	b := loom.ConnectBackend{URL: *connect, Token: *token, Agent: *agent, SessionName: *session, AttachOnly: true}
+	b, err := makeConnectBackend(*connect, *token, *agent, *session, *peer, true)
+	if err != nil {
+		return err
+	}
 	sess, err := b.Open(context.Background(), loom.SessionOpts{})
 	if err != nil {
 		return err
@@ -311,14 +342,19 @@ func cmdAwait(args []string) error {
 // idle time, last turn-id — so you know what to reattach.
 func cmdSessions(args []string) error {
 	fs := flag.NewFlagSet("sessions", flag.ExitOnError)
-	connect := fs.String("connect", "", "the `loom serve` endpoint (ws://host:port)")
+	connect := fs.String("connect", "", "the `loom serve` endpoint (ws://host:port, or wss:// for pinned mTLS)")
 	token := fs.String("token", "", "auth token for --connect")
+	peer := fs.String("peer", "", "(wss://) the pinned peer name you paired with")
 	jsonOut := fs.Bool("json", false, "emit the list as JSON to stdout")
 	_ = fs.Parse(args)
 	if *connect == "" {
 		return fmt.Errorf("sessions: --connect ws://host:port is required")
 	}
-	infos, err := loom.ConnectBackend{URL: *connect, Token: *token}.Sessions(context.Background())
+	b, err := makeConnectBackend(*connect, *token, "", "", *peer, false)
+	if err != nil {
+		return err
+	}
+	infos, err := b.Sessions(context.Background())
 	if err != nil {
 		return err
 	}
@@ -455,14 +491,15 @@ func cmdReview(args []string) error {
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	listen := fs.String("listen", "127.0.0.1:7777", "bind address (a mesh IP:port — do NOT use 0.0.0.0 without TLS)")
-	tokenFile := fs.String("token-file", "", "newline-delimited token file that gates clients (required)")
+	tokenFile := fs.String("token-file", "", "newline-delimited token file that gates clients (required unless --tls)")
 	addToken := fs.Bool("add-token", false, "mint a token, append it to --token-file, print it, and exit")
+	tlsFlag := fs.Bool("tls", false, "serve over pinned mTLS — peers enrolled with `loom pair` connect over wss://; --token-file becomes optional (the pin is the wall)")
 	idleTTL := fs.Duration("idle-ttl", 4*time.Hour, "downgrade a named resident idle longer than this to cold-resumable (closed, lineage remembered); 0 = never")
 	_ = fs.Parse(args)
-	if *tokenFile == "" {
-		return fmt.Errorf("serve: --token-file is required")
-	}
 	if *addToken {
+		if *tokenFile == "" {
+			return fmt.Errorf("serve --add-token: --token-file is required (that is where the token is appended)")
+		}
 		tok, err := loom.AddToken(*tokenFile)
 		if err != nil {
 			return err
@@ -471,7 +508,111 @@ func cmdServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "[token appended to %s — a client drives this box with:\n  loom run --connect ws://<this-box>:<port> --token %s ...]\n", *tokenFile, tok)
 		return nil
 	}
+	if *tlsFlag {
+		id, err := loom.LoadOrCreateIdentity("")
+		if err != nil {
+			return err
+		}
+		pins, err := loom.LoadPinStore("")
+		if err != nil {
+			return err
+		}
+		return loom.ServeTLS(*listen, *tokenFile, loom.Backends(), *idleTTL, id, pins)
+	}
+	if *tokenFile == "" {
+		return fmt.Errorf("serve: --token-file is required (or use --tls for pinned mTLS)")
+	}
 	return loom.Serve(*listen, *tokenFile, loom.Backends(), *idleTTL)
+}
+
+// pair: the SAS device-pairing ceremony — two nodes exchange keys, both humans confirm
+// the same six-digit PIN on both screens, and each pins the other's cert. No CA, no
+// pre-shared token. One side listens, the other connects; --name pins the peer.
+func cmdPair(args []string) error {
+	fs := flag.NewFlagSet("pair", flag.ExitOnError)
+	listen := fs.String("listen", "", "wait for one pairing connection on this addr (e.g. 100.x.y.z:7778)")
+	connect := fs.String("connect", "", "dial a peer's `loom pair --listen` (host:port)")
+	name := fs.String("name", "", "name to pin the peer under (prompted if omitted)")
+	_ = fs.Parse(args)
+	if (*listen == "") == (*connect == "") {
+		return fmt.Errorf("pair: exactly one of --listen or --connect is required")
+	}
+
+	id, err := loom.LoadOrCreateIdentity("")
+	if err != nil {
+		return err
+	}
+	pins, err := loom.LoadPinStore("")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "this node: %s\n", id.Fingerprint())
+
+	var outcome *loom.PairOutcome
+	if *connect != "" {
+		fmt.Fprintf(os.Stderr, "pairing with %s …\n", *connect)
+		outcome, err = loom.PairConnect(*connect, id)
+	} else {
+		fmt.Fprintf(os.Stderr, "waiting for a pairing connection on %s …\n", *listen)
+		outcome, err = loom.PairListen(*listen, id)
+	}
+	if err != nil {
+		return err
+	}
+
+	stdin := bufio.NewReader(os.Stdin)
+	ok, err := confirmSAS(stdin, outcome.SAS)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("pairing aborted — the PINs did not match (possible man-in-the-middle); nothing pinned")
+	}
+
+	peerName := *name
+	if peerName == "" {
+		peerName, err = promptLine(stdin, "name this peer: ")
+		if err != nil {
+			return err
+		}
+		if peerName == "" {
+			return fmt.Errorf("pair: a peer name is required to pin")
+		}
+	}
+	if err := pins.Add(peerName, outcome.PeerFingerprint); err != nil {
+		return err
+	}
+	fmt.Printf("pinned %q = %s\n", peerName, outcome.PeerFingerprint)
+	fmt.Fprintf(os.Stderr, "trusted. drive it with:\n  loom run --connect wss://<peer-host>:<port> --peer %s ...\n", peerName)
+	return nil
+}
+
+// confirmSAS shows the six-digit PIN in the two-screen confirm box (the BLE-pairing UX)
+// and reads the human's y/N. Only a "y"/"yes" is a match; anything else aborts.
+func confirmSAS(stdin *bufio.Reader, sas string) (bool, error) {
+	g := loom.GroupSAS(sas)
+	fmt.Fprintln(os.Stderr, "  ┌───────────────────────────────┐")
+	fmt.Fprintln(os.Stderr, "  │  Confirm this PIN matches the  │")
+	fmt.Fprintln(os.Stderr, "  │        other screen:          │")
+	fmt.Fprintf(os.Stderr, "  │            %s            │\n", g)
+	fmt.Fprintln(os.Stderr, "  └───────────────────────────────┘")
+	line, err := promptLine(stdin, "match on both screens? [y/N] ")
+	if err != nil {
+		return false, err
+	}
+	l := strings.ToLower(strings.TrimSpace(line))
+	return l == "y" || l == "yes", nil
+}
+
+// promptLine writes a prompt to stderr and reads one line from the shared stdin reader.
+// A single reader is shared across prompts so a read-ahead never swallows the next line.
+func promptLine(stdin *bufio.Reader, prompt string) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	line, err := stdin.ReadString('\n')
+	if err != nil && line == "" {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
 }
 
 func backendsFromList(list string) ([]loom.Backend, error) {
@@ -611,6 +752,9 @@ usage:
   loom panel  --agents claude,agy [--dir D] "prompt"           fan one prompt across agents (council)
   loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   review a diff or files
   loom serve --listen 127.0.0.1:7777 --token-file ~/.loom/tokens [--add-token] [--idle-ttl 4h]   run loom as a ws service
+  loom serve --listen 100.x.y.z:7777 --tls                     run loom over pinned mTLS (peers enrolled via loom pair)
+  loom pair  --listen 100.x.y.z:7778                           wait for a pairing (one box)
+  loom pair  --connect 100.x.y.z:7778 --name box-b             pair with the waiting box, confirm the PIN, pin its cert
   loom agents                                                  list backends
 
   warm-resident (over --connect): keep a claude process resident + warm and reattach by NAME —
@@ -621,5 +765,7 @@ usage:
 
   --connect ws://host:port --token T   (on run/chat/send) drive a remote loom serve over websocket —
                                        the --agent/--model/--dir/--resume/opts are opened THERE
+  --connect wss://host:port --peer N   (on run/chat/send) drive a remote loom serve over PINNED mTLS —
+                                       N is the pinned peer name from loom pair (no token needed)
   --session NAME                       (on run/chat/send) reattach a warm resident by name (no respawn)`)
 }

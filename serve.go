@@ -18,6 +18,7 @@ package loom
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -179,6 +180,13 @@ type server struct {
 	backends map[string]Backend
 	tokens   *tokenStore
 
+	// requireToken gates whether the hello must carry a valid token. Plain Serve always
+	// requires it (it refuses to start with an empty token file). ServeTLS makes it
+	// OPTIONAL: under pinned mTLS the peer's cert already authenticated it at the TLS
+	// layer, so a token is bootstrap defense-in-depth, not the wall. This is only ever
+	// false on an mTLS listener — never on a plain socket.
+	requireToken bool
+
 	idleTTL time.Duration // 0 = never downgrade on idle
 
 	// openMu serializes opens so the reattach-or-spawn check-and-register is atomic
@@ -218,16 +226,59 @@ func Serve(addr, tokenFile string, backends map[string]Backend, idleTTL time.Dur
 	return serveOn(ln, ts, backends, idleTTL)
 }
 
+// ServeTLS is Serve over a pinned-mTLS listener — the whim-P2P wall. The TCP listener is
+// wrapped in tls.NewListener with a config that presents this node's identity cert and
+// admits a peer iff its cert SPKI fingerprint is pinned (see TLSServerConfig); the
+// existing hand-rolled websocket then rides that encrypted, mutually-authenticated conn
+// unchanged (wsUpgrade hijacks the *tls.Conn like any net.Conn). The token file is
+// OPTIONAL here: the pin is already the wall, so a token — if supplied — is
+// defense-in-depth / bootstrap, not the gate (see server.requireToken). Because every
+// admitted peer proved a pinned identity, binding a wildcard/public address is safe in a
+// way plain Serve is not, so this path does not warn about the bind address.
+func ServeTLS(addr, tokenFile string, backends map[string]Backend, idleTTL time.Duration, id *Identity, pins *PinStore) error {
+	cfg, err := TLSServerConfig(id, pins)
+	if err != nil {
+		return fmt.Errorf("serve: tls config: %w", err)
+	}
+	ts := &tokenStore{hashes: map[[32]byte]struct{}{}}
+	if tokenFile != "" {
+		ts, err = loadTokenStore(tokenFile)
+		if err != nil {
+			return fmt.Errorf("serve: load tokens: %w", err)
+		}
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	tln := tls.NewListener(ln, cfg)
+
+	srv := newServer(ts, backends, idleTTL)
+	srv.requireToken = tokenFile != "" // no token file → the mTLS pin is the sole wall
+	fmt.Fprintf(os.Stderr, "loom serve (pinned mTLS) — listening on %s (pinned peers: %d, tokens: %d%s, backends: %v, idle-ttl: %s)\n",
+		ln.Addr(), len(pins.List()), ts.count(), tokenNote(srv.requireToken), names(backends), idleTTL)
+	return srv.serve(tln)
+}
+
+// tokenNote annotates the startup line so it is obvious whether a token is also required.
+func tokenNote(requireToken bool) string {
+	if requireToken {
+		return " (also required)"
+	}
+	return " (bootstrap only, not required)"
+}
+
 // newServer builds the server state. Split out so a test can hold the *server (to
 // drive the reaper deterministically) instead of only its address.
 func newServer(ts *tokenStore, backends map[string]Backend, idleTTL time.Duration) *server {
 	return &server{
-		backends:   backends,
-		tokens:     ts,
-		idleTTL:    idleTTL,
-		sessions:   map[string]*residentSession{},
-		byName:     map[string]*residentSession{},
-		remembered: map[string]rememberedSession{},
+		backends:     backends,
+		tokens:       ts,
+		requireToken: true, // safe default; ServeTLS relaxes it when the pin is the wall
+		idleTTL:      idleTTL,
+		sessions:     map[string]*residentSession{},
+		byName:       map[string]*residentSession{},
+		remembered:   map[string]rememberedSession{},
 	}
 }
 
@@ -285,7 +336,7 @@ func (s *server) handle(ws *wsConn) {
 	if err := ws.ReadJSON(&hello); err != nil {
 		return
 	}
-	if hello.Op != opHello || !s.tokens.verify(hello.Token) {
+	if hello.Op != opHello || (s.requireToken && !s.tokens.verify(hello.Token)) {
 		_ = ws.WriteJSON(frame{Op: opError, Err: "unauthorized"})
 		return
 	}

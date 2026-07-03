@@ -7,8 +7,10 @@ package loom
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -22,11 +24,19 @@ import (
 // makes an open reattach-or-fail (never spawn) — used by `await`, which must not create
 // a session just to poll one.
 type ConnectBackend struct {
-	URL         string // ws://host:port
+	URL         string // ws://host:port (or wss://host:port for pinned mTLS)
 	Token       string // auth token the server verifies
 	Agent       string // backend to open on the server ("" → claude)
 	SessionName string // stable name for a warm resident ("" → ephemeral, closed on disconnect)
 	AttachOnly  bool   // reattach a live resident by name, else error — never spawn
+
+	// Pinned mTLS (used only for a wss:// URL). Identity is this node's cert/key; Pins is
+	// the trust store; Peer names the pinned server we expect to answer. A ws:// URL
+	// ignores all three (plaintext on the encrypted mesh). Pair first (loom pair) to
+	// populate the pin these reference.
+	Identity *Identity
+	Pins     *PinStore
+	Peer     string
 }
 
 // Compile-time proof that the ws transport honors the same interfaces as a local
@@ -54,10 +64,28 @@ type DetachSession interface {
 
 func (b ConnectBackend) Name() string { return "connect" }
 
+// clientTLS builds the pinned-mTLS client config for a wss:// URL, or returns nil for a
+// plain ws:// URL (no TLS). It fails loudly if a wss:// URL is missing the identity/pins
+// it needs — dialing a pinned peer without a pin is a configuration error, not a silent
+// fallback to plaintext.
+func (b ConnectBackend) clientTLS() (*tls.Config, error) {
+	if !strings.HasPrefix(b.URL, "wss://") {
+		return nil, nil
+	}
+	if b.Identity == nil || b.Pins == nil {
+		return nil, fmt.Errorf("connect: wss:// needs a loaded identity and pin store")
+	}
+	return TLSClientConfig(b.Identity, b.Pins, b.Peer)
+}
+
 // dialHello dials the endpoint and completes the authenticated handshake, returning the
 // live socket. Shared by Open and the session-less ops (Sessions).
 func (b ConnectBackend) dialHello() (*wsConn, error) {
-	ws, err := wsDial(b.URL, http.Header{})
+	cfg, err := b.clientTLS()
+	if err != nil {
+		return nil, err
+	}
+	ws, err := wsDial(b.URL, http.Header{}, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect: dial %s: %w", b.URL, err)
 	}
