@@ -254,6 +254,35 @@ design guarantees, all hermetically tested (`serve_test.go`, no live claude / no
 
 An `open` without a name is unchanged: ephemeral, dropped on disconnect (unless `keep_alive`).
 
+### Pairing & pinned mTLS (`wss://`) — no CA, no shared secret
+
+`loom serve` binds a mesh IP over plaintext ws by design (the encryption is the mesh's, e.g.
+WireGuard). To make loom safe *on its own* — not just because it's on the mesh — two nodes can
+**pair** once and then talk over pinned-certificate mTLS:
+
+```sh
+# on each box, once — the watch-pairing ceremony:
+loom pair --listen 0.0.0.0:9999            # box A waits
+loom pair --connect A-host:9999 --name box-a   # box B dials
+
+# both terminals show the SAME six-digit PIN grouped "465 629" and prompt:
+#   match on both screens? [y/N]
+# tap y on BOTH → each pins the other's key. n or a mismatch → abort (possible MITM).
+
+# thereafter, serve + connect over mTLS instead of a token:
+loom serve --tls --listen 0.0.0.0:7777                    # token optional under --tls; the pin is the wall
+loom send  --connect wss://A-host:7777 --peer box-a --session iw "…"
+```
+
+The trust model is **pinned raw keys** (RFC 7250 / the SSH-and-WireGuard shape), not a CA:
+each node self-generates a persistent keypair + self-signed cert under `~/.loom/identity/`; the
+`~/.loom/pins` file maps a peer name → its SPKI fingerprint; verification is "does the peer's cert
+fingerprint match the pin?" — **no certificate authority, no expiry ceremony. Revoke a peer = delete
+its pin.** The pairing uses commit-then-reveal + a Short Authentication String bound to the ECDH
+shared secret (ZRTP's shape): a man-in-the-middle who substitutes keys makes the two PINs diverge, so
+the human's tap catches it. Zero external dependencies — Go stdlib crypto only. Plain `ws://` + `--token`
+is unchanged; `wss://` requires `--peer <name>` (dial a *known* pin, never trust-on-first-use).
+
 ### Test
 
 ```sh
