@@ -41,14 +41,20 @@ func TestSASDeterministic(t *testing.T) {
 }
 
 // pairingTranscript is symmetric: the two nodes disagree on which key is "self" vs
-// "peer", but the sorted transcript — and therefore the SAS — is identical.
+// "peer", but the sorted public values PLUS the shared ECDH secret (identical on both
+// sides) yield the same transcript — and therefore the same SAS.
 func TestPairingTranscriptSymmetric(t *testing.T) {
 	ephA, ephB := []byte{0x02, 0xaa}, []byte{0x03, 0xbb}
 	spkiA, spkiB := []byte{0x11}, []byte{0x22}
-	fromA := pairingTranscript(ephA, ephB, spkiA, spkiB)
-	fromB := pairingTranscript(ephB, ephA, spkiB, spkiA)
+	shared := []byte{0x77, 0x88} // ECDH is symmetric → both sides pass the same bytes
+	fromA := pairingTranscript(ephA, ephB, spkiA, spkiB, shared)
+	fromB := pairingTranscript(ephB, ephA, spkiB, spkiA, shared)
 	if string(fromA) != string(fromB) {
 		t.Fatalf("transcript not symmetric across the two sides")
+	}
+	// the shared secret must actually change the SAS (binding, not decoration)
+	if string(fromA) == string(pairingTranscript(ephA, ephB, spkiA, spkiB, []byte{0x00})) {
+		t.Fatalf("shared secret did not affect the transcript — it is not bound into the SAS")
 	}
 }
 

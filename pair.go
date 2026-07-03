@@ -171,10 +171,18 @@ func pairHandshake(conn io.ReadWriter, id *Identity, initiator bool) (*pairResul
 	}
 
 	// Validate the peer's ephemeral public key is a real point on P-256 (rejects a
-	// malformed/off-curve value) — a genuine check even though the shared secret is not
-	// folded into the SAS in v1 (see the transcript note below).
-	if _, err := curve.NewPublicKey(peerReveal.EphPub); err != nil {
+	// malformed/off-curve value), then complete the ECDH: the shared secret binds the SAS
+	// to the actual key agreement (ZRTP's full shape). A MITM substituting keys computes a
+	// DIFFERENT shared secret with each side, so the SAS can no longer match on both screens
+	// — the human's PIN-compare now attests the key exchange itself, not just the public
+	// values. (Both sides derive the same secret, so it needs no canonical ordering.)
+	peerPub, err := curve.NewPublicKey(peerReveal.EphPub)
+	if err != nil {
 		return nil, fmt.Errorf("pair: peer ephemeral key invalid: %w", err)
+	}
+	shared, err := ephPriv.ECDH(peerPub)
+	if err != nil {
+		return nil, fmt.Errorf("pair: ECDH: %w", err)
 	}
 
 	peerCert, err := x509.ParseCertificate(peerReveal.Cert)
@@ -182,7 +190,7 @@ func pairHandshake(conn io.ReadWriter, id *Identity, initiator bool) (*pairResul
 		return nil, fmt.Errorf("pair: parse peer cert: %w", err)
 	}
 
-	transcript := pairingTranscript(ephPub, peerReveal.EphPub, spkiFingerprintRaw(id.Cert), spkiFingerprintRaw(peerCert))
+	transcript := pairingTranscript(ephPub, peerReveal.EphPub, spkiFingerprintRaw(id.Cert), spkiFingerprintRaw(peerCert), shared)
 	return &pairResult{
 		SAS:             sasDigits(transcript),
 		PeerFingerprint: SPKIFingerprint(peerCert),
@@ -217,20 +225,22 @@ func verifyCommit(commit, ephPub, nonce []byte) bool {
 // input. A MITM that substitutes either its ephemeral key or its cert changes the set of
 // values on one leg, so the two PINs diverge.
 //
-// ★ Transcript composition follows the ratified proposal EXACTLY: both ephemeral
-// pubkeys + both SPKI fingerprints. The ECDH shared secret is deliberately NOT folded in
-// for v1 — the commit-then-reveal is what defeats grinding, and the SAS over the
-// committed public values detects substitution. See the report's design-notes for the
-// recommended follow-up (binding the DH secret, ZRTP's full shape) and the honest
-// limitation this leaves.
-func pairingTranscript(ephSelf, ephPeer, spkiSelf, spkiPeer []byte) []byte {
+// ★ Transcript composition (ZRTP's full shape): both ephemeral pubkeys + both SPKI
+// fingerprints + the ECDH SHARED SECRET. Public values are canonically ordered (sortPair)
+// so both sides build the identical string; the shared secret is symmetric so it appends
+// as-is. Binding the secret means the human's PIN-compare attests the actual key
+// agreement — a MITM who substitutes ephemeral keys derives a different secret with each
+// side, so the two SAS values diverge and the tap fails. The commit-then-reveal defeats
+// online grinding; the shared secret defeats key substitution. Both are load-bearing.
+func pairingTranscript(ephSelf, ephPeer, spkiSelf, spkiPeer, shared []byte) []byte {
 	e1, e2 := sortPair(ephSelf, ephPeer)
 	s1, s2 := sortPair(spkiSelf, spkiPeer)
-	out := make([]byte, 0, len(e1)+len(e2)+len(s1)+len(s2))
+	out := make([]byte, 0, len(e1)+len(e2)+len(s1)+len(s2)+len(shared))
 	out = append(out, e1...)
 	out = append(out, e2...)
 	out = append(out, s1...)
 	out = append(out, s2...)
+	out = append(out, shared...)
 	return out
 }
 
