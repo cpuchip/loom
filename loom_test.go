@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -32,8 +34,12 @@ func TestResultParsing(t *testing.T) {
 }
 
 func TestConvIDFromPath(t *testing.T) {
-	brain := `C:\Users\x\.gemini\antigravity-cli\brain`
-	p := brain + `\conv-9f8\.system_generated\logs\transcript.jsonl`
+	// Fixture built with filepath.Join: the production input is always a LOCAL path
+	// from filepath.WalkDir, and a hardcoded `C:\…` literal only parses as a path on
+	// Windows (on Linux, backslash is a legal filename character, so filepath.Rel
+	// returns `..` garbage and the test fails for the wrong reason).
+	brain := filepath.Join("home", "x", ".gemini", "antigravity-cli", "brain")
+	p := filepath.Join(brain, "conv-9f8", ".system_generated", "logs", "transcript.jsonl")
 	if got := convIDFromPath(p, brain); got != "conv-9f8" {
 		t.Errorf("convID = %q, want conv-9f8", got)
 	}
@@ -71,19 +77,31 @@ func TestClaudeCmd(t *testing.T) {
 		t.Errorf("direct: args0=%q dir=%q", c.Args[0], c.Dir)
 	}
 
-	// isolate: docker run … loom-claude claude … (Windows path → forward slashes)
-	c = claudeCmd(ctx, "claude", SessionOpts{Isolate: true, Workdir: `C:\repo`}, args)
+	// isolate: docker run … loom-claude claude … Mount fixtures are platform-native:
+	// dockerVol is filepath.ToSlash, which converts the OS's OWN separator — `C:\repo`
+	// only becomes C:/repo on Windows, so the conversion is asserted in the
+	// Windows-gated subtest below and the cross-platform contract (wd:"/work") here.
+	c = claudeCmd(ctx, "claude", SessionOpts{Isolate: true, Workdir: "/repo"}, args)
 	j := strings.Join(c.Args, " ")
-	if c.Args[0] != "docker" || !strings.Contains(j, "loom-claude") || !strings.Contains(j, "C:/repo:/work") {
+	if c.Args[0] != "docker" || !strings.Contains(j, "loom-claude") || !strings.Contains(j, "/repo:/work") {
 		t.Errorf("isolate: %v", c.Args)
 	}
 
 	// isolate + claude-home: the home is mounted as the container's ~/.claude
 	// (writable → persisted sessions + skills/instructions injection). The image runs
 	// as non-root `node`, so ~/.claude lives at /home/node/.claude.
-	c = claudeCmd(ctx, "claude", SessionOpts{Isolate: true, Workdir: `C:\repo`, ClaudeHome: `C:\cfg`}, args)
-	if !strings.Contains(strings.Join(c.Args, " "), "C:/cfg:/home/node/.claude") {
+	c = claudeCmd(ctx, "claude", SessionOpts{Isolate: true, Workdir: "/repo", ClaudeHome: "/cfg"}, args)
+	if !strings.Contains(strings.Join(c.Args, " "), "/cfg:/home/node/.claude") {
 		t.Errorf("isolate+claude-home: %v", c.Args)
+	}
+
+	// Windows: backslash paths must reach docker forward-slashed (Docker Desktop).
+	if runtime.GOOS == "windows" {
+		c = claudeCmd(ctx, "claude", SessionOpts{Isolate: true, Workdir: `C:\repo`, ClaudeHome: `C:\cfg`}, args)
+		j = strings.Join(c.Args, " ")
+		if !strings.Contains(j, "C:/repo:/work") || !strings.Contains(j, "C:/cfg:/home/node/.claude") {
+			t.Errorf("windows isolate paths not slashed for docker: %v", c.Args)
+		}
 	}
 
 	// remote: ssh -T host bash -lc 'cd <dir> && claude …' — the login shell (-lc) is

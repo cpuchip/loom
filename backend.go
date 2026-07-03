@@ -72,6 +72,7 @@ type Interruptible interface {
 func Backends() map[string]Backend {
 	return map[string]Backend{
 		"claude": ClaudeBackend{Bin: "claude"},
+		"codex":  CodexBackend{Bin: "codex"},
 		"agy":    DefaultAgyBackend(),
 		"local":  DefaultLocalBackend(),
 	}
