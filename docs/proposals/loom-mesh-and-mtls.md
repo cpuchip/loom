@@ -80,6 +80,44 @@ Layered — each tool for its situation, which honors "both, but sequenced":
 
 Net: **SAS-pairing for whim-P2P, token for headless bootstrap, hub-CA for scale.**
 
+## ★ Standards research (2026-07-03) — every rung has an RFC; nothing rolled
+
+Michael asked whether a peer-to-peer mTLS with BLE-like pairing exists as an
+industry standard, no CA. **Yes — as a well-worn composition of named standards**
+(no single turnkey RFC, but every piece is published + vetted). Recorded here so
+the build (NOT yet green-lit — "I don't want to push it yet") starts
+standards-anchored:
+
+- **CA-less mTLS = pinned keys — RFC 7250** ("Raw Public Keys in TLS"): TLS with
+  no cert chain; authenticate by pinning the peer's key. Same trust model as SSH
+  host keys and **WireGuard** (which NetBird already runs underneath — the mesh
+  itself is precedent). Go reality: `crypto/tls` lacks RFC 7250's wire format;
+  the idiomatic equivalent is self-signed certs + custom `VerifyPeerCertificate`
+  checking the pinned **SPKI fingerprint** (the pinning concept of RFC 7469).
+  Stdlib-only; the cert is an envelope, the pin is the trust.
+- **The pairing ceremony — two standardized forms:**
+  - **PAKE**: SPAKE2 (**RFC 9382**) or **CPace** (the IETF CFRG's chosen balanced
+    PAKE). A short one-time code bootstraps a strong secret; a MITM gets exactly
+    ONE online guess (no offline brute-force of a 6-digit code). Magic Wormhole
+    is the canonical deployment. Not in Go stdlib — vendor a small vetted impl
+    (wormhole-william's SPAKE2; compact CPace impls exist).
+  - **SAS comparison**: ZRTP (**RFC 6189**) / Bluetooth numeric comparison — ECDH,
+    then both sides display a short transcript-derived string; the human confirms
+    match on both screens (Michael's exact watch-pairing analogy). Needs ONLY
+    stdlib (`crypto/ecdh` + `crypto/sha256`).
+- **The composed flow** (Magic Wormhole / Bluetooth SSP / ZRTP shape): pair once
+  (code or SAS, human tap = trust) → exchange + PIN SPKI fingerprints over the
+  authenticated channel → thereafter plain mTLS where verify = pin match. No CA,
+  no expiry ceremony; revoke = delete the pin. The hub (if ever) = an optional
+  fingerprint directory, NOT a trust root — which strengthens the generic-hub
+  constraint.
+- **Cautionary tale**: WPS PIN failed by leaking half the PIN per attempt — the
+  argument for implementing published, test-vectored protocols, never inventing
+  the commitment scheme.
+- **Recommended sequencing for loom's zero-dep soul**: SAS-first (pure stdlib,
+  matches the watch UX exactly); add SPAKE2/CPace later only if unattended
+  pairing (no human watching both screens) becomes real.
+
 ## The pairing UX Michael wants (from the BLE analogy — make it exactly this)
 
 ```
