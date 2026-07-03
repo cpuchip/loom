@@ -281,18 +281,30 @@ func cmdAwait(args []string) error {
 	if !ok {
 		return fmt.Errorf("await: session does not support await (needs --connect)")
 	}
-	r, running, err := ds.Await(context.Background(), *turn, *lastReply, time.Duration(*timeout)*time.Second)
-	if err != nil {
-		return err
-	}
-	if running {
-		if *jsonOut {
-			return json.NewEncoder(os.Stdout).Encode(map[string]any{"turn_id": *turn, "status": "running"})
+	// The server bounds a single await block (awaitMax); a --timeout beyond that is
+	// honored HERE by looping bounded server awaits until the deadline — so
+	// `--timeout 1800` is one command that blocks up to 30 minutes, not a poll dance
+	// the caller has to script (the field lesson from driving a 17-turn work order).
+	deadline := time.Now().Add(time.Duration(*timeout) * time.Second)
+	for {
+		remain := time.Until(deadline)
+		if remain <= 0 {
+			break
 		}
-		fmt.Fprintf(os.Stderr, "[turn still running — poll again: loom await … --turn %d]\n", *turn)
-		return nil
+		r, running, err := ds.Await(context.Background(), *turn, *lastReply, remain)
+		if err != nil {
+			return err
+		}
+		if !running {
+			return emitReply(r, *jsonOut)
+		}
+		// server clamped its block and the turn is still going — loop until OUR deadline
 	}
-	return emitReply(r, *jsonOut)
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"turn_id": *turn, "status": "running"})
+	}
+	fmt.Fprintf(os.Stderr, "[turn still running — poll again: loom await … --turn %d]\n", *turn)
+	return nil
 }
 
 // sessions: list the warm residents a `loom serve` holds — name, backend, frozen opts,
