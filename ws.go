@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -110,26 +111,40 @@ func wsUpgrade(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
 	return &wsConn{conn: conn, br: brw.Reader, isClient: false}, nil
 }
 
-// wsDial performs the client-side handshake: dial TCP, send the upgrade request
-// with a random Sec-WebSocket-Key, verify the server's accept. header carries any
-// extra request headers (unused today; the auth token rides in the hello frame).
-func wsDial(rawURL string, header http.Header) (*wsConn, error) {
+// wsDial performs the client-side handshake: dial TCP (or TLS for wss://), send the
+// upgrade request with a random Sec-WebSocket-Key, verify the server's accept. header
+// carries any extra request headers (unused today; the auth token rides in the hello
+// frame). tlsConfig is required for a wss:// URL and ignored for ws:// — it carries the
+// pinned-mTLS identity + peer pin (see TLSClientConfig); the websocket then rides the
+// encrypted conn transparently, since everything below reads from a net.Conn.
+func wsDial(rawURL string, header http.Header, tlsConfig *tls.Config) (*wsConn, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, err
 	}
+	useTLS := false
+	defaultPort := "80"
 	switch u.Scheme {
 	case "ws":
 	case "wss":
-		return nil, fmt.Errorf("ws: wss:// (TLS) not supported yet — use ws:// on the encrypted mesh")
+		if tlsConfig == nil {
+			return nil, fmt.Errorf("ws: wss:// requires pinned-mTLS — name the peer with --peer and pair first (loom pair)")
+		}
+		useTLS = true
+		defaultPort = "443"
 	default:
-		return nil, fmt.Errorf("ws: unsupported scheme %q (want ws://)", u.Scheme)
+		return nil, fmt.Errorf("ws: unsupported scheme %q (want ws:// or wss://)", u.Scheme)
 	}
 	addr := u.Host
 	if u.Port() == "" {
-		addr = net.JoinHostPort(u.Hostname(), "80")
+		addr = net.JoinHostPort(u.Hostname(), defaultPort)
 	}
-	conn, err := net.Dial("tcp", addr)
+	var conn net.Conn
+	if useTLS {
+		conn, err = tls.Dial("tcp", addr, tlsConfig)
+	} else {
+		conn, err = net.Dial("tcp", addr)
+	}
 	if err != nil {
 		return nil, err
 	}
