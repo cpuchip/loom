@@ -19,18 +19,49 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
-// openaiClaudeHome, if set via `loom serve --openai-claude-home`, is the ~/.claude
-// the shim's isolated sessions mount (skills/settings/MCP). Empty = loom's default.
-// Package-level because the serve listener is constructed without plumbing extra opts.
+// openaiClaudeHome, if set via `loom serve --openai-claude-home`, is the DEFAULT
+// ~/.claude the shim's isolated sessions mount (skills/settings/MCP). Empty =
+// loom's default. Package-level because the serve listener is constructed
+// without plumbing extra opts.
 var openaiClaudeHome string
 
-// SetOpenAIClaudeHome sets the ~/.claude the OpenAI shim mounts. Called from the
-// serve command before the listener starts.
+// openaiHomeRoot, if set via `loom serve --openai-home-root`, enables ROLE-aware
+// environments: a model named "<model>#<role>" (e.g. "sonnet#critic") mounts
+// <root>/<role>-claude-home instead of the default. This lets one loom serve
+// host purpose-built environments — a code-review home, an argument-critique
+// home, a plain home — each with its own CLAUDE.md/skills, selected per request
+// by the model name. A bare "sonnet" or an unknown role uses the default home.
+var openaiHomeRoot string
+
+// SetOpenAIClaudeHome sets the default ~/.claude the OpenAI shim mounts.
 func SetOpenAIClaudeHome(home string) { openaiClaudeHome = home }
+
+// SetOpenAIHomeRoot sets the directory that holds role-specific claude-homes
+// (<root>/<role>-claude-home), selected by a "<model>#<role>" model name.
+func SetOpenAIHomeRoot(root string) { openaiHomeRoot = root }
+
+// resolveModelHome splits a "model#role" name into the bare claude model and the
+// role-specific claude-home. "sonnet#critic" -> ("sonnet", <root>/critic-claude-home).
+// A bare "sonnet", an empty role, or a role whose home dir is missing all fall
+// back to the default home with the model unchanged (a config gap never fails a
+// request — it just loses the specialization).
+func resolveModelHome(model string) (bareModel, home string) {
+	base, role, found := strings.Cut(model, "#")
+	if !found || role == "" || openaiHomeRoot == "" {
+		return model, openaiClaudeHome
+	}
+	h := filepath.Join(openaiHomeRoot, role+"-claude-home")
+	if fi, err := os.Stat(h); err != nil || !fi.IsDir() {
+		return base, openaiClaudeHome
+	}
+	return base, h
+}
 
 // openaiChatReq is the subset of the OpenAI request body we honor.
 type openaiChatReq struct {
@@ -78,11 +109,13 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 
+	// Role-aware environment: "sonnet#critic" -> sonnet + the critic home.
+	bareModel, home := resolveModelHome(req.Model)
 	sess, err := be.Open(ctx, SessionOpts{
-		Model:           req.Model, // e.g. "sonnet" — loom passes --model straight through
+		Model:           bareModel, // loom passes --model straight through
 		Isolate:         true,      // clean sandbox per review; no host-config bleed
 		SkipPermissions: true,
-		ClaudeHome:      openaiClaudeHome,
+		ClaudeHome:      home,
 	})
 	if err != nil {
 		writeOpenAIErr(w, req.Stream, fmt.Errorf("open session: %w", err))

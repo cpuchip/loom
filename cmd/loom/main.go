@@ -495,9 +495,11 @@ func cmdServe(args []string) error {
 	addToken := fs.Bool("add-token", false, "mint a token, append it to --token-file, print it, and exit")
 	tlsFlag := fs.Bool("tls", false, "serve over pinned mTLS — peers enrolled with `loom pair` connect over wss://; --token-file becomes optional (the pin is the wall)")
 	idleTTL := fs.Duration("idle-ttl", 4*time.Hour, "downgrade a named resident idle longer than this to cold-resumable (closed, lineage remembered); 0 = never")
-	openaiHome := fs.String("openai-claude-home", "", "~/.claude the OpenAI-shim's isolated sessions mount (skills/settings/MCP); empty = loom default. The /v1/chat/completions endpoint shares the --listen port.")
+	openaiHome := fs.String("openai-claude-home", "", "default ~/.claude the OpenAI-shim's isolated sessions mount (skills/settings/MCP); empty = loom default. The /v1/chat/completions endpoint shares the --listen port.")
+	openaiHomeRoot := fs.String("openai-home-root", "", "dir holding role-specific claude-homes (<root>/<role>-claude-home); a model named \"<model>#<role>\" (e.g. sonnet#critic) mounts that role's home. Lets one serve host purpose-built environments (critic, review, ...).")
 	_ = fs.Parse(args)
 	loom.SetOpenAIClaudeHome(*openaiHome)
+	loom.SetOpenAIHomeRoot(*openaiHomeRoot)
 	if *addToken {
 		if *tokenFile == "" {
 			return fmt.Errorf("serve --add-token: --token-file is required (that is where the token is appended)")
