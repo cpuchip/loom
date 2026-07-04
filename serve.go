@@ -294,6 +294,14 @@ func (s *server) serve(ln net.Listener) error {
 	}
 	httpSrv := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// OpenAI-compat shim shares the listener with the native ws
+			// protocol (path-routed): a chat-completions POST makes loom a
+			// dispatchable model provider (see openai.go); everything else is
+			// the native websocket.
+			if r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/chat/completions" {
+				s.serveOpenAI(w, r)
+				return
+			}
 			ws, err := wsUpgrade(w, r)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
