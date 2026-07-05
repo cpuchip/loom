@@ -39,8 +39,21 @@ var openaiClaudeHome string
 // by the model name. A bare "sonnet" or an unknown role uses the default home.
 var openaiHomeRoot string
 
+// openaiMCPConfig, if set via `loom serve --openai-mcp-config`, is the
+// --mcp-config JSON handed to every shim-spawned session — the hinge back into
+// pg-ai-stewards (doc_*, doc_search, …). Without it a shim critic is a plain
+// Claude Code with no substrate tools, so a doc-construction critique/finalize
+// stage cannot read or pool the draft. NOTE: an isolated session runs in a Linux
+// container, so the config's server must be reachable FROM the container (a
+// container-baked binary or an http endpoint via host.docker.internal), and any
+// DSN must resolve there too.
+var openaiMCPConfig string
+
 // SetOpenAIClaudeHome sets the default ~/.claude the OpenAI shim mounts.
 func SetOpenAIClaudeHome(home string) { openaiClaudeHome = home }
+
+// SetOpenAIMCPConfig sets the --mcp-config JSON path handed to shim sessions.
+func SetOpenAIMCPConfig(path string) { openaiMCPConfig = path }
 
 // SetOpenAIHomeRoot sets the directory that holds role-specific claude-homes
 // (<root>/<role>-claude-home), selected by a "<model>#<role>" model name.
@@ -116,6 +129,7 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 		Isolate:         true,      // clean sandbox per review; no host-config bleed
 		SkipPermissions: true,
 		ClaudeHome:      home,
+		MCPConfig:       openaiMCPConfig, // hinge into pg-ai-stewards (doc_* etc.), if configured
 	})
 	if err != nil {
 		writeOpenAIErr(w, req.Stream, fmt.Errorf("open session: %w", err))
