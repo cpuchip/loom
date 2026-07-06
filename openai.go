@@ -49,11 +49,27 @@ var openaiHomeRoot string
 // DSN must resolve there too.
 var openaiMCPConfig string
 
+// openaiTimeout caps one shim completion end-to-end (session spawn → reply).
+// The shim's context is also tied to the HTTP request, so the EFFECTIVE
+// ceiling is min(this, the caller's own client timeout) — pg-ai-stewards'
+// bgworker defaults to 1800s (STEWARDS_CHAT_TIMEOUT_SECONDS), so keep this
+// ABOVE the caller's or the caller governs. The old hardcoded 10 minutes
+// silently killed grounded high-effort sessions mid-work while the caller's
+// retry restarted them from zero — an invisible spend loop (#334).
+var openaiTimeout = 30 * time.Minute
+
 // SetOpenAIClaudeHome sets the default ~/.claude the OpenAI shim mounts.
 func SetOpenAIClaudeHome(home string) { openaiClaudeHome = home }
 
 // SetOpenAIMCPConfig sets the --mcp-config JSON path handed to shim sessions.
 func SetOpenAIMCPConfig(path string) { openaiMCPConfig = path }
+
+// SetOpenAITimeout sets the per-completion wall clock (`--openai-timeout`).
+func SetOpenAITimeout(d time.Duration) {
+	if d > 0 {
+		openaiTimeout = d
+	}
+}
 
 // SetOpenAIHomeRoot sets the directory that holds role-specific claude-homes
 // (<root>/<role>-claude-home), selected by a "<model>#<role>" model name.
@@ -95,6 +111,72 @@ type openaiChatReq struct {
 	Model    string          `json:"model"`
 	Messages []openaiMessage `json:"messages"`
 	Stream   bool            `json:"stream"`
+	// User is OpenAI's standard end-user identifier. pg-ai-stewards sets it to
+	// the dispatching stage's session id (wi--<uuid8>--<stage>); the shim
+	// forwards it into the session's MCP config as an X-Stewards-Session
+	// header so the substrate can scope the session's doc drafts to the work
+	// item it serves (#333 — provenance for all-loom doc-construction).
+	User string `json:"user"`
+}
+
+// sessionMCPConfig derives a per-session MCP config from the role home's base
+// config, injecting an X-Stewards-Session header into every server entry. It
+// returns the IN-CONTAINER path to pass as --mcp-config plus the HOST path for
+// cleanup. Any failure returns ("", "") — the session falls back to the static
+// config and merely loses provenance, never the request.
+//
+// Path mapping: baseInContainer is an in-container path (the mounted home is
+// /home/node/.claude); its basename must exist in the HOST home dir. The
+// derived file is written under <home>/.session-mcp/ (host) which the session
+// sees at /home/node/.claude/.session-mcp/ (the home is the mount).
+func sessionMCPConfig(hostHome, baseInContainer, session string) (inContainer, hostPath string) {
+	if hostHome == "" || baseInContainer == "" || session == "" {
+		return "", ""
+	}
+	raw, err := os.ReadFile(filepath.Join(hostHome, filepath.Base(filepath.ToSlash(baseInContainer))))
+	if err != nil {
+		return "", ""
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return "", ""
+	}
+	servers, _ := cfg["mcpServers"].(map[string]any)
+	if len(servers) == 0 {
+		return "", ""
+	}
+	for _, v := range servers {
+		srv, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		headers, _ := srv["headers"].(map[string]any)
+		if headers == nil {
+			headers = map[string]any{}
+		}
+		headers["X-Stewards-Session"] = session
+		srv["headers"] = headers
+	}
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", ""
+	}
+	dir := filepath.Join(hostHome, ".session-mcp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", ""
+	}
+	f, err := os.CreateTemp(dir, "mcp-*.json")
+	if err != nil {
+		return "", ""
+	}
+	hostPath = f.Name()
+	if _, err := f.Write(out); err != nil {
+		f.Close()
+		os.Remove(hostPath)
+		return "", ""
+	}
+	f.Close()
+	return "/home/node/.claude/.session-mcp/" + filepath.Base(hostPath), hostPath
 }
 
 type openaiMessage struct {
@@ -133,12 +215,24 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(r.Context(), openaiTimeout)
 	defer cancel()
 
 	// Role-aware environment: "sonnet#critic" -> sonnet + the critic home
 	// (+ the critic workdir mounted ro as /work, if <root>/critic-workdir exists).
 	bareModel, home, workdir := resolveModelHome(req.Model)
+
+	// #333: a substrate dispatch declares its session in the standard `user`
+	// field — derive a per-session MCP config carrying it as a header, so the
+	// session's doc drafts scope to the work item. Fallback = static config.
+	mcpCfg := openaiMCPConfig
+	if strings.HasPrefix(req.User, "wi--") {
+		if derived, host := sessionMCPConfig(home, openaiMCPConfig, req.User); derived != "" {
+			mcpCfg = derived
+			defer os.Remove(host)
+		}
+	}
+
 	sess, err := be.Open(ctx, SessionOpts{
 		Model:           bareModel, // loom passes --model straight through
 		Isolate:         true,      // clean sandbox per review; no host-config bleed
@@ -146,7 +240,7 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 		ClaudeHome:      home,
 		Workdir:         workdir, // role context ("" = serve's own cwd, the historical default)
 		WorkdirRO:       workdir != "",
-		MCPConfig:       openaiMCPConfig, // hinge into pg-ai-stewards (doc_* etc.), if configured
+		MCPConfig:       mcpCfg, // hinge into pg-ai-stewards (doc_* etc.), if configured
 	})
 	if err != nil {
 		writeOpenAIErr(w, req.Stream, fmt.Errorf("open session: %w", err))

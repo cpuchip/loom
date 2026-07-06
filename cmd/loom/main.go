@@ -498,10 +498,12 @@ func cmdServe(args []string) error {
 	openaiHome := fs.String("openai-claude-home", "", "default ~/.claude the OpenAI-shim's isolated sessions mount (skills/settings/MCP); empty = loom default. The /v1/chat/completions endpoint shares the --listen port.")
 	openaiHomeRoot := fs.String("openai-home-root", "", "dir holding role-specific claude-homes (<root>/<role>-claude-home); a model named \"<model>#<role>\" (e.g. sonnet#critic) mounts that role's home. Lets one serve host purpose-built environments (critic, review, ...).")
 	openaiMCP := fs.String("openai-mcp-config", "", "--mcp-config JSON handed to every OpenAI-shim session: the hinge back into pg-ai-stewards (doc_*, doc_search, …). Isolated sessions run in a Linux container, so the config's server must be reachable from there (container-baked binary or http via host.docker.internal).")
+	openaiTimeout := fs.Duration("openai-timeout", 30*time.Minute, "wall-clock cap for ONE shim completion (session spawn → reply). Keep it ABOVE the caller's own client timeout — the session dies with the client connection, so the smaller of the two governs and a too-small pair silently restarts long sessions from zero on the caller's retry.")
 	_ = fs.Parse(args)
 	loom.SetOpenAIClaudeHome(*openaiHome)
 	loom.SetOpenAIHomeRoot(*openaiHomeRoot)
 	loom.SetOpenAIMCPConfig(*openaiMCP)
+	loom.SetOpenAITimeout(*openaiTimeout)
 	if *addToken {
 		if *tokenFile == "" {
 			return fmt.Errorf("serve --add-token: --token-file is required (that is where the token is appended)")
