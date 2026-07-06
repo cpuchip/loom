@@ -59,21 +59,35 @@ func SetOpenAIMCPConfig(path string) { openaiMCPConfig = path }
 // (<root>/<role>-claude-home), selected by a "<model>#<role>" model name.
 func SetOpenAIHomeRoot(root string) { openaiHomeRoot = root }
 
-// resolveModelHome splits a "model#role" name into the bare claude model and the
-// role-specific claude-home. "sonnet#critic" -> ("sonnet", <root>/critic-claude-home).
+// resolveModelHome splits a "model#role" name into the bare claude model, the
+// role-specific claude-home, and the role-specific WORKDIR.
+// "sonnet#critic" -> ("sonnet", <root>/critic-claude-home, <root>/critic-workdir).
 // A bare "sonnet", an empty role, or a role whose home dir is missing all fall
 // back to the default home with the model unchanged (a config gap never fails a
 // request — it just loses the specialization).
-func resolveModelHome(model string) (bareModel, home string) {
+//
+// The workdir is the role's CONTEXT: an optional sibling directory
+// (<root>/<role>-workdir) bind-mounted READ-ONLY as /work in the isolated
+// session. Without it a shim session is a model in a bare room — it can reason
+// but cannot ground (the pg-ai-stewards war-game seat's first artifacts had
+// assumptions ledgers dominated by "source unreadable" for exactly this
+// reason). The mount is ro because a shim seat reads context and writes ONLY
+// through its MCP hinge; the workdir is never an exfil channel. Missing dir =
+// no mount (workdir ""), same never-fail degradation as the home.
+func resolveModelHome(model string) (bareModel, home, workdir string) {
 	base, role, found := strings.Cut(model, "#")
 	if !found || role == "" || openaiHomeRoot == "" {
-		return model, openaiClaudeHome
+		return model, openaiClaudeHome, ""
 	}
 	h := filepath.Join(openaiHomeRoot, role+"-claude-home")
 	if fi, err := os.Stat(h); err != nil || !fi.IsDir() {
-		return base, openaiClaudeHome
+		return base, openaiClaudeHome, ""
 	}
-	return base, h
+	w := filepath.Join(openaiHomeRoot, role+"-workdir")
+	if fi, err := os.Stat(w); err != nil || !fi.IsDir() {
+		return base, h, ""
+	}
+	return base, h, w
 }
 
 // openaiChatReq is the subset of the OpenAI request body we honor.
@@ -122,13 +136,16 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 
-	// Role-aware environment: "sonnet#critic" -> sonnet + the critic home.
-	bareModel, home := resolveModelHome(req.Model)
+	// Role-aware environment: "sonnet#critic" -> sonnet + the critic home
+	// (+ the critic workdir mounted ro as /work, if <root>/critic-workdir exists).
+	bareModel, home, workdir := resolveModelHome(req.Model)
 	sess, err := be.Open(ctx, SessionOpts{
 		Model:           bareModel, // loom passes --model straight through
 		Isolate:         true,      // clean sandbox per review; no host-config bleed
 		SkipPermissions: true,
 		ClaudeHome:      home,
+		Workdir:         workdir, // role context ("" = serve's own cwd, the historical default)
+		WorkdirRO:       workdir != "",
 		MCPConfig:       openaiMCPConfig, // hinge into pg-ai-stewards (doc_* etc.), if configured
 	})
 	if err != nil {

@@ -345,7 +345,7 @@ func resolveClaudeBin(bin string) string {
 // as the container's WRITABLE ~/.claude — skills, instructions, settings, MCP, AND
 // persisted session state (so a later --resume container reattaches). The creds are
 // still layered read-only on top, so auth works without copying secrets into the home.
-func dockerArgs(wd, creds, claudeHome, image string, claudeArgs []string) []string {
+func dockerArgs(wd string, wdRO bool, creds, claudeHome, image string, claudeArgs []string) []string {
 	if image == "" {
 		image = "loom-claude"
 	}
@@ -355,7 +355,11 @@ func dockerArgs(wd, creds, claudeHome, image string, claudeArgs []string) []stri
 	if claudeHome != "" {
 		a = append(a, "-v", claudeHome+":"+claudeDir)
 	}
-	a = append(a, "-v", wd+":/work", "-w", "/work")
+	wdMount := wd + ":/work"
+	if wdRO {
+		wdMount += ":ro" // context-only seat: /work is reference material, never an exfil channel
+	}
+	a = append(a, "-v", wdMount, "-w", "/work")
 	if creds != "" {
 		a = append(a, "-v", creds+":"+claudeDir+"/.credentials.json:ro")
 	}
@@ -376,7 +380,7 @@ func dockerRunArgs(opts SessionOpts, claudeArgs []string) []string {
 	if opts.ClaudeHome != "" {
 		claudeHome = dockerVol(opts.ClaudeHome)
 	}
-	return dockerArgs(dockerVol(wd), dockerVol(creds), claudeHome, opts.Image, claudeArgs)
+	return dockerArgs(dockerVol(wd), opts.WorkdirRO, dockerVol(creds), claudeHome, opts.Image, claudeArgs)
 }
 
 // remoteDockerArgs sandboxes claude on the REMOTE box (for --remote --isolate). The
@@ -390,7 +394,7 @@ func remoteDockerArgs(opts SessionOpts, claudeArgs []string) []string {
 	if wd == "" {
 		wd = "$HOME"
 	}
-	return dockerArgs(wd, "$HOME/.claude/.credentials.json", opts.ClaudeHome, opts.Image, claudeArgs)
+	return dockerArgs(wd, opts.WorkdirRO, "$HOME/.claude/.credentials.json", opts.ClaudeHome, opts.Image, claudeArgs)
 }
 
 // dockerVol normalizes a host path for a Docker bind mount (C:\path → C:/path,

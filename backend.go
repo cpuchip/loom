@@ -19,8 +19,9 @@ type Reply struct {
 
 // SessionOpts configure a session.
 type SessionOpts struct {
-	Workdir string // process working dir ("" = inherit)
-	Model   string // backend-specific model override ("" = default)
+	Workdir   string // process working dir ("" = inherit)
+	WorkdirRO bool   // (--isolate) mount Workdir as /work READ-ONLY — for context-only seats (shim role workdirs) whose only write channel is their MCP hinge
+	Model     string // backend-specific model override ("" = default)
 	Isolate bool   // run the agent in a docker sandbox (claude backend) — walls the host
 	Image   string // docker image for isolation ("" = loom-claude)
 	Remote  string // run the agent on a remote box over ssh (e.g. "cpuchip@host"); "" = local
