@@ -275,7 +275,11 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 		sse = newSSEWriter(w, req.Model)
 		onEvent = func(ev Event) {
 			if ev.Kind == EvAssistant && ev.Text != "" {
-				sse.chunk(ev.Text)
+				// Segments are whole messages; join with a newline so the
+				// caller's sentence splitter (TTS) hears a boundary instead
+				// of "now.No" run-ons.
+				sse.chunk(ev.Text + "
+")
 			}
 		}
 	}
