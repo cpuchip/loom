@@ -1,9 +1,10 @@
 # loom
 
 **A harness around the harnesses.** loom drives multiple coding-agent CLIs — Claude
-Code, Google Antigravity's `agy` (Gemini), and others — as long-lived workers behind
-one Go interface, so a backend (or a human) can hand work to whichever agent fits,
-keep a session alive across turns, or fan one prompt across several at once.
+Code, Codex, GitHub Copilot CLI, opencode, Google Antigravity's `agy` (Gemini), and
+others — as long-lived workers behind one Go interface, so a backend (or a human) can
+hand work to whichever agent fits, keep a session alive across turns, or fan one
+prompt across several at once.
 
 A weaving *harness* is literally a loom component, and a loom holds many harnesses at
 once. That's the idea: each agent CLI is its own harness; loom weaves them.
@@ -26,6 +27,8 @@ The backends are deliberately heterogeneous, because the real CLIs are:
 | **codex** | one-shot `codex exec --json` per turn (JSONL events on stdout, prompt over stdin) | `codex exec resume <thread_id>` (fresh process/turn; codex checkpoints every session to disk) | **claude-grade parity** — **verified** (codex-cli 0.141.0, 2026-07-02): resume recalls context, tool events stream, interrupt = signal the turn's process (the on-disk session survives → steer via the next Send). Trust ladder maps to codex's **native kernel sandbox**: `--consult` → `read-only` (instruction AND enforcement), `--isolate` → `workspace-write` (no docker image needed), skip-permissions → `--dangerously-bypass-approvals-and-sandbox`. Claude-only opts (MCP config, allowed-tools, permission-mode) ride codex `config.toml`/profiles instead. |
 | **local** | stateless `POST /v1/chat/completions` (OpenAI-compat: llama-chip `:8090`, LM Studio, vLLM) | loom keeps the message history | **the simplest backend** — no process/stdio; **verified** (single + multi-turn) against the live rig; free. Makes `panel` a cloud+local council. |
 | **agy** | one-shot `agy -p` per turn | `--conversation <id>` resume (fresh process/turn) | works (single-turn **verified** in a live `panel`, 2026-06-29) — two headless bugs worked around: stdin-EOF hang (feed empty stdin) + stdout-drop (recover the answer from the transcript file) |
+| **opencode** | one-shot `opencode run --format json` per turn (JSON events on stdout, prompt as argv) | `run -s <sessionID>` (fresh process/turn; opencode persists sessions) | **verified** (opencode-ai 1.17.15, 2026-07-08): resume recalls context, tool events stream, and `step_finish` reports **real USD cost** — the only backend that fills `Reply.CostUSD`. Model via `-m provider/model` (the opencode-go/zen zoo: glm, kimi, deepseek, qwen…). Skip-permissions → `--auto`. No native filesystem sandbox — wall it externally when it matters. |
+| **copilot** | one-shot `copilot -p … --output-format json` per turn (JSONL on stdout) | `--resume <sessionId>` (fresh process/turn; the id is stable) | **verified** (GitHub Copilot CLI 1.0.69, 2026-07-08): resume recalls context, tool events stream, the final `result` line carries the session id + usage. Trust ladder rides copilot's native permissions: skip-permissions → `--allow-all`, `--isolate` → `--allow-all-tools` with file paths still walled to the workdir (copilot's path verification), consult → directive with unapproved tools failing closed. Real hinge mappings: MCP config → `--additional-mcp-config @file`, allowed-tools → `--allow-tool=…`. Always `--no-auto-update`. NOTE: VS Code's copilot-chat ships its own `copilot` that can shadow npm's on PATH and lag versions — pin with `LOOM_COPILOT_BIN`. |
 
 **Why agy is the awkward one:** agy has **no working stdio/stream-json mode** — it's an open, Google-acknowledged gap (antigravity-cli issues [#76](https://github.com/google-antigravity/antigravity-cli/issues/76) stdout-drop, [#119](https://github.com/google-antigravity/antigravity-cli/issues/119) stream-json parity, [#31](https://github.com/google-antigravity/antigravity-cli/issues/31) `--acp`); `--output-format json` is currently *rejected*. The two real workarounds are **transcript-scrape** (what loom does — the right path on Windows) or a **pseudo-TTY wrap** (`script -qec '…' /dev/null`, Unix-only). When agy ships stream-json, the agy backend swaps to the clean path and drops the scrape.
 

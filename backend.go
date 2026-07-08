@@ -72,9 +72,11 @@ type Interruptible interface {
 // Backends returns the built-in backend registry keyed by name.
 func Backends() map[string]Backend {
 	return map[string]Backend{
-		"claude": ClaudeBackend{Bin: "claude"},
-		"codex":  CodexBackend{Bin: "codex"},
-		"agy":    DefaultAgyBackend(),
-		"local":  DefaultLocalBackend(),
+		"claude":   ClaudeBackend{Bin: "claude"},
+		"codex":    CodexBackend{Bin: "codex"},
+		"agy":      DefaultAgyBackend(),
+		"opencode": OpencodeBackend{Bin: "opencode"},
+		"copilot":  CopilotBackend{Bin: "copilot"},
+		"local":    DefaultLocalBackend(),
 	}
 }
