@@ -278,8 +278,7 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 				// Segments are whole messages; join with a newline so the
 				// caller's sentence splitter (TTS) hears a boundary instead
 				// of "now.No" run-ons.
-				sse.chunk(ev.Text + "
-")
+				sse.chunk(ev.Text + "\n")
 			}
 		}
 	}
