@@ -233,35 +233,160 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sess, err := be.Open(ctx, SessionOpts{
-		Model:           bareModel, // loom passes --model straight through
-		Isolate:         true,      // clean sandbox per review; no host-config bleed
-		SkipPermissions: true,
-		ClaudeHome:      home,
-		Workdir:         workdir, // role context ("" = serve's own cwd, the historical default)
-		WorkdirRO:       workdir != "",
-		MCPConfig:       mcpCfg, // hinge into pg-ai-stewards (doc_* etc.), if configured
-	})
-	if err != nil {
-		writeOpenAIErr(w, req.Stream, fmt.Errorf("open session: %w", err))
-		return
+	open := func(resume string) (Session, error) {
+		return be.Open(ctx, SessionOpts{
+			Model:           bareModel, // loom passes --model straight through
+			Isolate:         true,      // clean sandbox per turn; no host-config bleed
+			SkipPermissions: true,
+			ClaudeHome:      home,
+			Workdir:         workdir, // role context ("" = serve's own cwd, the historical default)
+			WorkdirRO:       workdir != "",
+			MCPConfig:       mcpCfg, // hinge into pg-ai-stewards (doc_* etc.), if configured
+			Resume:          resume, // sticky conversations: continue the living session
+		})
 	}
-	defer sess.Close()
 
-	reply, err := sess.Send(ctx, flattenMessages(req.Messages))
+	// Sticky conversations (user = "sticky:<name>", see openai_sticky.go): one
+	// living claude session per (model,user). The container is still per-turn;
+	// the session state persists in the mounted role home. Everything else
+	// keeps the historical fresh-per-turn semantics.
+	var entry *stickyEntry
+	resume := ""
+	if key := stickyKeyFor(req.Model, req.User); key != "" {
+		entry = stickyFor(key)
+		entry.mu.Lock() // serialize turns within one conversation
+		defer entry.mu.Unlock()
+		resume = entry.sessionID
+	}
+	prompt := flattenMessages(req.Messages)
+	if resume != "" {
+		if d, ok := flattenDelta(req.Messages); ok {
+			prompt = d // the resumed session already holds the rest
+		}
+	}
+
+	// Streaming: forward assistant text SEGMENTS as SSE deltas while the turn
+	// runs (claude emits one assistant event per message — text lands between
+	// tool calls, so a voice caller can speak the first sentence while tools
+	// are still working). Non-stream keeps the single-JSON reply.
+	var sse *sseWriter
+	var onEvent func(Event)
+	if req.Stream {
+		sse = newSSEWriter(w, req.Model)
+		onEvent = func(ev Event) {
+			if ev.Kind == EvAssistant && ev.Text != "" {
+				sse.chunk(ev.Text)
+			}
+		}
+	}
+
+	runOnce := func(res string, p string) (Reply, error) {
+		sess, err := open(res)
+		if err != nil {
+			return Reply{}, fmt.Errorf("open session: %w", err)
+		}
+		defer sess.Close()
+		if onEvent != nil {
+			return sess.SendStream(ctx, p, onEvent)
+		}
+		return sess.Send(ctx, p)
+	}
+
+	reply, err := runOnce(resume, prompt)
+	if err == nil && reply.Err != "" {
+		err = fmt.Errorf("%s", reply.Err)
+	}
+	// Resume fallback: the caller sends the FULL history every turn, so a dead
+	// session (file gone, home swapped) costs nothing — drop the mapping and
+	// replay the whole transcript into a fresh session, once. Only when no
+	// streamed bytes are out yet (a mid-stream failure can't be restarted).
+	if err != nil && resume != "" && (sse == nil || !sse.started()) {
+		entry.sessionID = ""
+		reply, err = runOnce("", flattenMessages(req.Messages))
+		if err == nil && reply.Err != "" {
+			err = fmt.Errorf("%s", reply.Err)
+		}
+	}
 	if err != nil {
+		if sse != nil && sse.started() {
+			sse.fail(err)
+			return
+		}
 		writeOpenAIErr(w, req.Stream, fmt.Errorf("send: %w", err))
 		return
 	}
-	if reply.Err != "" {
-		writeOpenAIErr(w, req.Stream, fmt.Errorf("%s", reply.Err))
-		return
+
+	if entry != nil && reply.SessionID != "" {
+		// --resume may mint a new id that continues the transcript; always
+		// follow the latest.
+		entry.sessionID = reply.SessionID
+		stickyTouch(entry)
 	}
 
-	if req.Stream {
-		writeOpenAISSE(w, req.Model, reply.Text)
+	if sse != nil {
+		sse.finish(reply.Text)
 	} else {
 		writeOpenAIJSON(w, req.Model, reply.Text)
+	}
+}
+
+// sseWriter emits OpenAI streaming chunks incrementally. finish() closes the
+// stream; if no assistant segments were streamed (backend produced only a
+// final result), it falls back to emitting the reply text as one chunk so the
+// caller never receives an empty stream.
+type sseWriter struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	model   string
+	sent    bool
+	headers bool
+}
+
+func newSSEWriter(w http.ResponseWriter, model string) *sseWriter {
+	f, _ := w.(http.Flusher)
+	return &sseWriter{w: w, flusher: f, model: model}
+}
+
+func (s *sseWriter) started() bool { return s.sent }
+
+func (s *sseWriter) emit(v any) {
+	if !s.headers {
+		s.w.Header().Set("Content-Type", "text/event-stream")
+		s.w.Header().Set("Cache-Control", "no-cache")
+		s.headers = true
+		s.emit(map[string]any{"id": "chatcmpl-loom", "object": "chat.completion.chunk", "model": s.model,
+			"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant"}}}})
+	}
+	bs, _ := json.Marshal(v)
+	fmt.Fprintf(s.w, "data: %s\n\n", bs)
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
+}
+
+func (s *sseWriter) chunk(text string) {
+	s.sent = true
+	s.emit(map[string]any{"id": "chatcmpl-loom", "object": "chat.completion.chunk", "model": s.model,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": text}}}})
+}
+
+func (s *sseWriter) finish(replyText string) {
+	if !s.sent && replyText != "" {
+		s.chunk(replyText)
+	}
+	s.emit(map[string]any{"id": "chatcmpl-loom", "object": "chat.completion.chunk", "model": s.model,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
+	fmt.Fprint(s.w, "data: [DONE]\n\n")
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
+}
+
+func (s *sseWriter) fail(err error) {
+	s.emit(map[string]any{"error": map[string]any{"message": err.Error()}})
+	fmt.Fprint(s.w, "data: [DONE]\n\n")
+	if s.flusher != nil {
+		s.flusher.Flush()
 	}
 }
 
