@@ -33,10 +33,10 @@ func TestResolveModelHomeRoleWorkdir(t *testing.T) {
 		wantModel, wantHomeTail string
 		wantWorkdir             bool
 	}{
-		{"sonnet#wargame", "sonnet", "wargame-claude-home", true},  // home + workdir
-		{"sonnet#critic", "sonnet", "critic-claude-home", false},   // home only
-		{"sonnet#nosuchrole", "sonnet", "default-home", false},     // no home → default, no workdir
-		{"sonnet", "sonnet", "default-home", false},                // bare model
+		{"sonnet#wargame", "sonnet", "wargame-claude-home", true}, // home + workdir
+		{"sonnet#critic", "sonnet", "critic-claude-home", false},  // home only
+		{"sonnet#nosuchrole", "sonnet", "default-home", false},    // no home → default, no workdir
+		{"sonnet", "sonnet", "default-home", false},               // bare model
 	}
 	for _, tc := range tests {
 		gotModel, gotHome, gotWorkdir := resolveModelHome(tc.model)

@@ -49,12 +49,12 @@ func TestConvIDFromPath(t *testing.T) {
 // loom self-review caught — qwen3.x/vLLM seed the opening tag in the prompt).
 func TestStripThink(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"<think>reason</think>answer", "answer"},          // matched pair
-		{"reason</think>answer", "answer"},                 // orphan closing tag
-		{"<think>a</think>x<think>b</think>y", "xy"},        // multiple pairs
-		{"<think>only reasoning</think>", ""},              // reasoning only
-		{"no tags at all", "no tags at all"},               // untagged → unchanged
-		{"  spaced answer  ", "spaced answer"},             // trims
+		{"<think>reason</think>answer", "answer"},    // matched pair
+		{"reason</think>answer", "answer"},           // orphan closing tag
+		{"<think>a</think>x<think>b</think>y", "xy"}, // multiple pairs
+		{"<think>only reasoning</think>", ""},        // reasoning only
+		{"no tags at all", "no tags at all"},         // untagged → unchanged
+		{"  spaced answer  ", "spaced answer"},       // trims
 	}
 	for _, c := range cases {
 		if got := stripThink(c.in); got != c.want {

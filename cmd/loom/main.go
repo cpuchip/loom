@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -86,12 +87,12 @@ func pickBackend(name string) (loom.Backend, error) {
 // sessFlags is the shared flag set for the session commands (run, chat) — the
 // backend selector plus the whole claude-configuration surface.
 type sessFlags struct {
-	agent, model, dir, remote, resume *string
-	mcpConfig, allowedTools, permMode *string
-	sysPromptFile, claudeHome         *string
-	connect, token, session, peer     *string
-	events, isolate, skipPerms, json  *bool
-	consult                           *bool
+	agent, model, dir, clone, remote, resume *string
+	mcpConfig, allowedTools, permMode        *string
+	sysPromptFile, claudeHome                *string
+	connect, token, session, peer            *string
+	events, isolate, skipPerms, json         *bool
+	consult                                  *bool
 }
 
 func addSessionFlags(fs *flag.FlagSet) *sessFlags {
@@ -116,6 +117,10 @@ func addSessionFlags(fs *flag.FlagSet) *sessFlags {
 		session:       fs.String("session", "", "(--connect) reattach a warm resident by this stable NAME — a second use reuses the live process, no respawn/cold-read"),
 		json:          fs.Bool("json", false, "emit the Reply as JSON to stdout (for programmatic/subprocess callers)"),
 	}
+}
+
+func addCloneFlag(fs *flag.FlagSet, sf *sessFlags) {
+	sf.clone = fs.String("clone", "", "git URL to clone before starting (uses --dir, or a fresh temp dir)")
 }
 
 // chooseBackend routes to the ws transport when --connect is set (the remote server
@@ -160,14 +165,85 @@ func (sf *sessFlags) opts() loom.SessionOpts {
 	}
 }
 
+// resolveClone prepares the local workdir before the backend is opened. A clone cannot
+// be paired with --remote: git would run here while the agent works somewhere else.
+func resolveClone(cloneURL, dir, remote string, stderr io.Writer) (string, error) {
+	if cloneURL == "" {
+		return dir, nil
+	}
+	if remote != "" {
+		return "", fmt.Errorf("--clone cannot be used with --remote")
+	}
+
+	tempDir := dir == ""
+	if tempDir {
+		var err error
+		dir, err = os.MkdirTemp("", "loom-clone-")
+		if err != nil {
+			return "", fmt.Errorf("make clone temp dir: %w", err)
+		}
+	} else if err := requireEmptyDir(dir); err != nil {
+		return "", err
+	}
+
+	output, err := exec.Command("git", "clone", cloneURL, dir).CombinedOutput()
+	if err != nil {
+		if tempDir {
+			_ = os.RemoveAll(dir)
+		}
+		return "", fmt.Errorf("git clone %q %q: %w: %s", cloneURL, dir, err, strings.TrimSpace(string(output)))
+	}
+	if tempDir {
+		fmt.Fprintf(stderr, "[cloned into %s]\n", dir)
+	}
+	return dir, nil
+}
+
+// requireEmptyDir refuses to hand git a destination containing user work. Git itself
+// creates a missing destination, while an existing empty one is safe to populate.
+func requireEmptyDir(dir string) error {
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect clone destination %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("clone destination %q exists and is not an empty directory", dir)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("inspect clone destination %q: %w", dir, err)
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("clone destination %q exists and is not empty", dir)
+	}
+	return nil
+}
+
+func (sf *sessFlags) resolveClone(stderr io.Writer) error {
+	dir, err := resolveClone(*sf.clone, *sf.dir, *sf.remote, stderr)
+	if err != nil {
+		return err
+	}
+	*sf.dir = dir
+	return nil
+}
+
 // run: one-shot prompt → single reply.
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	sf := addSessionFlags(fs)
+	addCloneFlag(fs, sf)
 	_ = fs.Parse(args)
 	prompt := strings.Join(fs.Args(), " ")
 	if prompt == "" {
 		return fmt.Errorf("run: need a prompt")
+	}
+	if err := sf.resolveClone(os.Stderr); err != nil {
+		return err
 	}
 	b, err := chooseBackend(sf)
 	if err != nil {
@@ -195,7 +271,11 @@ func cmdRun(args []string) error {
 func cmdChat(args []string) error {
 	fs := flag.NewFlagSet("chat", flag.ExitOnError)
 	sf := addSessionFlags(fs)
+	addCloneFlag(fs, sf)
 	_ = fs.Parse(args)
+	if err := sf.resolveClone(os.Stderr); err != nil {
+		return err
+	}
 	b, err := chooseBackend(sf)
 	if err != nil {
 		return err

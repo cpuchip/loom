@@ -15,9 +15,9 @@ import (
 // AgyBackend drives Google Antigravity's `agy` (Gemini). Unlike Claude Code, agy
 // has NO stream-json mode — each turn is a one-shot `agy -p` with two known bugs:
 //
-//	1. it HANGS waiting on stdin EOF in a non-TTY → we feed an empty stdin.
-//	2. it DROPS the response from stdout (exit 0, empty pipe) → we recover it from
-//	   the on-disk transcript (newest …/transcript.jsonl, last PLANNER_RESPONSE).
+//  1. it HANGS waiting on stdin EOF in a non-TTY → we feed an empty stdin.
+//  2. it DROPS the response from stdout (exit 0, empty pipe) → we recover it from
+//     the on-disk transcript (newest …/transcript.jsonl, last PLANNER_RESPONSE).
 //
 // Multi-turn is via `--conversation <id>` resume (a fresh process per turn). This
 // backend is EXPERIMENTAL: the recovery is timing-sensitive (newest-transcript
@@ -85,7 +85,7 @@ func (s *agySession) SendStream(ctx context.Context, prompt string, onEvent func
 }
 
 func (s *agySession) SessionID() string { return s.convID }
-func (s *agySession) Close() error       { return nil }
+func (s *agySession) Close() error      { return nil }
 
 // recoverLatest reads the newest transcript.jsonl under BrainDir and returns the
 // last non-empty PLANNER_RESPONSE content + its conversation id (the dir name).

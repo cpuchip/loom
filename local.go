@@ -160,7 +160,7 @@ func (s *localSession) SessionID() string {
 	defer s.mu.Unlock()
 	return "local:" + s.model
 }
-func (s *localSession) Close() error      { return nil }
+func (s *localSession) Close() error { return nil }
 
 // firstModel returns the first id from /v1/models (used when no model is set).
 func (b LocalBackend) firstModel(ctx context.Context) string {

@@ -55,6 +55,7 @@ loom run   --agent claude "summarize the files in this dir"      # one-shot
 loom run   --agent claude --events "count the .go files"         # + stream tool calls/thinking to stderr
 loom run   --agent local  --model gemma-4-12b "..."              # a free local model on llama-chip's :8090
 loom chat  --agent claude --dir /path/to/repo                    # multi-turn: one msg per stdin line
+loom run   --agent claude --clone https://github.com/org/repo.git "..." # clone into a fresh temp workdir
 loom panel  --agents local,claude "is this function correct?"    # cloud+local council: fan + compare
 loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   # review a git diff or files
 loom run    --agent claude --isolate --dir /path/to/repo "..."   # claude in a docker sandbox (host walled off)
