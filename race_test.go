@@ -183,7 +183,11 @@ func TestRaceCopiesIsolatedWorkdirsWithoutGit(t *testing.T) {
 	}
 	a := &raceTestBackend{name: "a", send: check}
 	b := &raceTestBackend{name: "b", send: check}
-	res, err := Race(context.Background(), RaceConfig{Contenders: []RaceContender{{Agent: "a", Backend: a}, {Agent: "b", Backend: b}}, Prompt: "build", Oracle: raceExit(1), Dir: source})
+	res, err := Race(context.Background(), RaceConfig{
+		Contenders: []RaceContender{{Agent: "a", Backend: a}, {Agent: "b", Backend: b}},
+		Opts:       SessionOpts{SkipPermissions: true, AllowedTools: "Read"},
+		Prompt:     "build", Oracle: raceExit(1), Dir: source,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,6 +196,14 @@ func TestRaceCopiesIsolatedWorkdirsWithoutGit(t *testing.T) {
 	}
 	if a.workdir(t) == b.workdir(t) {
 		t.Fatal("contenders shared a workdir")
+	}
+	for _, backend := range []*raceTestBackend{a, b} {
+		backend.mu.Lock()
+		opts := backend.opts[0]
+		backend.mu.Unlock()
+		if !opts.SkipPermissions || opts.AllowedTools != "Read" {
+			t.Errorf("trust options not passed through: %+v", opts)
+		}
 	}
 }
 

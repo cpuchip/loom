@@ -52,6 +52,8 @@ func main() {
 		err = cmdReview(os.Args[2:])
 	case "duo":
 		err = cmdDuo(os.Args[2:])
+	case "race":
+		err = cmdRace(os.Args[2:])
 	case "send":
 		err = cmdSend(os.Args[2:])
 	case "await":
@@ -509,6 +511,106 @@ func cmdPanel(args []string) error {
 	return nil
 }
 
+// race: give independent local worktrees to several agents and keep the first tree whose
+// deterministic oracle passes. It deliberately uses the run flag surface so trust controls
+// (notably --skip-permissions and --allowed-tools) reach every contender unchanged.
+func cmdRace(args []string) error {
+	fs := flag.NewFlagSet("race", flag.ExitOnError)
+	sf := addSessionFlags(fs)
+	contenderList := fs.String("contenders", "", "comma-separated agent[:model] contenders")
+	oracle := fs.String("oracle", "", "shell command that judges each contender; required because a race needs a deterministic judge")
+	timeout := fs.Int("timeout", 600, "whole-race timeout in seconds")
+	_ = fs.Parse(args)
+	prompt := strings.Join(fs.Args(), " ")
+	if prompt == "" {
+		return fmt.Errorf("race: need a prompt")
+	}
+	if *oracle == "" {
+		return fmt.Errorf("race: -oracle is required (a race needs a deterministic judge)")
+	}
+	if *sf.connect != "" {
+		return fmt.Errorf("race: --connect is not supported (race runs local contenders in isolated dirs)")
+	}
+	if *sf.remote != "" {
+		return fmt.Errorf("race: --remote is not supported (race runs local contenders in isolated dirs)")
+	}
+	if *sf.resume != "" {
+		return fmt.Errorf("race: --resume is not supported (each contender needs a fresh independent session)")
+	}
+	if *timeout <= 0 {
+		return fmt.Errorf("race: --timeout must be greater than zero")
+	}
+	contenders, err := loom.ParseRaceContenders(*contenderList)
+	if err != nil {
+		return err
+	}
+	for i := range contenders {
+		contenders[i].Backend, err = pickBackend(contenders[i].Agent)
+		if err != nil {
+			return err
+		}
+	}
+
+	res, err := loom.Race(context.Background(), loom.RaceConfig{
+		Contenders: contenders, Opts: sf.opts(), Prompt: prompt, Oracle: *oracle, Dir: *sf.dir,
+		Timeout:  time.Duration(*timeout) * time.Second,
+		Observer: raceObserverCLI(*sf.json),
+	})
+	if err != nil {
+		return err
+	}
+	return emitRace(res, *sf.json)
+}
+
+func raceObserverCLI(jsonOut bool) loom.RaceObserver {
+	if jsonOut {
+		return loom.RaceObserver{}
+	}
+	name := func(c loom.RaceContender) string {
+		if c.Model == "" {
+			return c.Agent
+		}
+		return c.Agent + ":" + c.Model
+	}
+	return loom.RaceObserver{
+		Start: func(c loom.RaceContender, dir string) {
+			fmt.Fprintf(os.Stderr, "[race] %s started in %s\n", name(c), dir)
+		},
+		Finish: func(c loom.RaceContender, result loom.RaceContenderResult) {
+			fmt.Fprintf(os.Stderr, "[race] %s finished: %s\n", name(c), result.Status)
+		},
+		Verdict: func(c loom.RaceContender, rc int, passed bool) {
+			verdict := "failed"
+			if passed {
+				verdict = "passed"
+			}
+			fmt.Fprintf(os.Stderr, "[race] %s oracle %s (rc=%d)\n", name(c), verdict, rc)
+		},
+	}
+}
+
+// emitRace keeps stdout useful to both humans and scripts. In human mode the winner's
+// directory is prominent because it, not the agents' prose, is the race deliverable.
+func emitRace(res loom.RaceResult, jsonOut bool) error {
+	if jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(res)
+	}
+	if res.Winner == nil {
+		fmt.Printf("Race finished: %s (no winning deliverable)\n", res.Status)
+		return nil
+	}
+	model := res.Winner.Agent
+	if res.Winner.Model != "" {
+		model += ":" + res.Winner.Model
+	}
+	fmt.Printf("Winner: %s (%.2fs)\n", model, res.Winner.DurationS)
+	fmt.Printf("Deliverable directory: %s\n", res.Winner.Dir)
+	if res.CostUSD > 0 {
+		fmt.Fprintf(os.Stderr, "[race $%.4f]\n", res.CostUSD)
+	}
+	return nil
+}
+
 // review: load a diff (or files) and fan a code-review across one or more agents.
 func cmdReview(args []string) error {
 	fs := flag.NewFlagSet("review", flag.ExitOnError)
@@ -959,6 +1061,7 @@ usage:
   loom run   --agent claude [--model M] [--dir D] "prompt"     one-shot
   loom chat  --agent claude [--model M] [--dir D]              multi-turn (one msg per stdin line)
   loom panel  --agents claude,agy [--dir D] "prompt"           fan one prompt across agents (council)
+	loom race   --contenders codex:gpt-5.6-terra,claude:sonnet --oracle "<shell cmd>" [--dir D] [--timeout 600] "prompt"
   loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   review a diff or files
   loom duo    --agent claude --critic-agent codex [--dir D] [--rounds 6] "task"   worker builds, critic judges each build point
   loom serve --listen 127.0.0.1:7777 --token-file ~/.loom/tokens [--add-token] [--idle-ttl 4h]   run loom as a ws service

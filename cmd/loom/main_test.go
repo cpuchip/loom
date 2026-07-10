@@ -2,12 +2,42 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestUsageIncludesRace(t *testing.T) {
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	usage()
+	_ = w.Close()
+	os.Stderr = old
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(output), "loom race") {
+		t.Fatalf("usage omitted race:\n%s", output)
+	}
+}
+
+func TestCmdRaceRejectsMissingOracleAndConnect(t *testing.T) {
+	if err := cmdRace([]string{"-contenders", "local", "prompt"}); err == nil || !strings.Contains(err.Error(), "-oracle is required") {
+		t.Fatalf("missing oracle error = %v", err)
+	}
+	err := cmdRace([]string{"-contenders", "local", "-oracle", "exit 0", "-connect", "ws://example", "prompt"})
+	if err == nil || !strings.Contains(err.Error(), "--connect is not supported") {
+		t.Fatalf("connect error = %v", err)
+	}
+}
 
 func TestResolveCloneTempDir(t *testing.T) {
 	origin := makeOrigin(t)

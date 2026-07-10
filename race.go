@@ -186,7 +186,11 @@ func runRaceContender(ctx context.Context, cfg RaceConfig, index int, contender 
 
 	opts := cfg.Opts
 	opts.Workdir = dir
-	opts.Model = contender.Model
+	// An explicit contender model wins, while an agent-only contender retains the caller's
+	// default model. This makes the compact agent[:model] syntax additive to run's flags.
+	if contender.Model != "" {
+		opts.Model = contender.Model
+	}
 	// A race compares fresh, independent attempts; sharing a resumed conversation would
 	// leak work between contenders even though their filesystem trees are isolated.
 	opts.Resume = ""
