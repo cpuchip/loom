@@ -1061,7 +1061,7 @@ usage:
   loom run   --agent claude [--model M] [--dir D] "prompt"     one-shot
   loom chat  --agent claude [--model M] [--dir D]              multi-turn (one msg per stdin line)
   loom panel  --agents claude,agy [--dir D] "prompt"           fan one prompt across agents (council)
-	loom race   --contenders codex:gpt-5.6-terra,claude:sonnet --oracle "<shell cmd>" [--dir D] [--timeout 600] "prompt"
+  loom race   --contenders codex:gpt-5.6-terra,claude:sonnet --oracle "<shell cmd>" [--dir D] [--timeout 600] "prompt"
   loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   review a diff or files
   loom duo    --agent claude --critic-agent codex [--dir D] [--rounds 6] "task"   worker builds, critic judges each build point
   loom serve --listen 127.0.0.1:7777 --token-file ~/.loom/tokens [--add-token] [--idle-ttl 4h]   run loom as a ws service
