@@ -50,6 +50,8 @@ func main() {
 		err = cmdPanel(os.Args[2:])
 	case "review":
 		err = cmdReview(os.Args[2:])
+	case "duo":
+		err = cmdDuo(os.Args[2:])
 	case "send":
 		err = cmdSend(os.Args[2:])
 	case "await":
@@ -566,6 +568,125 @@ func cmdReview(args []string) error {
 	return nil
 }
 
+// duo: two agents bound to one workdir — a WORKER that builds and a CRITIC (trajectory
+// eval) that judges at every build point, with loom running the loop between them. The
+// worker opens with the caller's trust flags (exactly as `run`); the critic ALWAYS opens
+// read-only (--consult) on the SAME --dir, so it inspects reality but can never write. The
+// critic backend/model default to the worker's when --critic-* are omitted.
+func cmdDuo(args []string) error {
+	fs := flag.NewFlagSet("duo", flag.ExitOnError)
+	sf := addSessionFlags(fs) // the worker's whole run-trust surface (dir, model, isolate, remote, mcp-config, …)
+	criticAgent := fs.String("critic-agent", "", "critic backend for the trajectory eval (defaults to --agent)")
+	criticModel := fs.String("critic-model", "", "critic model (defaults to --model)")
+	rounds := fs.Int("rounds", loom.DuoDefaultRounds, "max build-point rounds before finishing with rounds_exhausted")
+	_ = fs.Parse(args)
+	task := strings.Join(fs.Args(), " ")
+	if task == "" {
+		return fmt.Errorf("duo: need a build task")
+	}
+	// duo runs two LOCAL sessions bound to one --dir; the warm-resident / ws transport
+	// (--connect) drives a single remote session and isn't wired for the pair.
+	if *sf.connect != "" {
+		return fmt.Errorf("duo: --connect is not supported (duo runs two local sessions bound to one --dir)")
+	}
+
+	worker, err := pickBackend(*sf.agent)
+	if err != nil {
+		return err
+	}
+	critic := worker
+	if *criticAgent != "" {
+		if critic, err = pickBackend(*criticAgent); err != nil {
+			return err
+		}
+	}
+
+	// The critic shares the worker's environment (same --dir, isolate/remote) so it sees
+	// the SAME tree, but with its own model (default: the worker's), a FRESH session (never
+	// the worker's --resume id — that's a different conversation), and read-only intent. Duo
+	// also forces Consult; setting it here keeps the CLI's intent visible.
+	workerOpts := sf.opts()
+	criticOpts := sf.opts()
+	if *criticModel != "" {
+		criticOpts.Model = *criticModel
+	}
+	criticOpts.Resume = ""
+	criticOpts.Consult = true
+
+	res, err := loom.Duo(context.Background(), loom.DuoConfig{
+		Worker: worker, Critic: critic,
+		WorkerOpts: workerOpts, CriticOpts: criticOpts,
+		Task: task, Rounds: *rounds,
+		Observer: duoObserverCLI(*sf.events, *sf.json),
+	})
+	if err != nil {
+		return err
+	}
+	return emitDuo(res, *sf.json)
+}
+
+// duoObserverCLI narrates a duo run to stderr — round banners + verdicts in the human mode,
+// each seat's tool events (tagged [worker]/[critic]) under --events. In --json mode the
+// human narration is suppressed (stdout carries the one JSON object), but loop WARNINGS and
+// --events still reach stderr: a garbled verdict must never be silent.
+func duoObserverCLI(events, jsonOut bool) loom.DuoObserver {
+	obs := loom.DuoObserver{
+		Warn: func(msg string) { fmt.Fprintf(os.Stderr, "  [duo] %s\n", msg) },
+	}
+	if !jsonOut {
+		obs.Round = func(n int) { fmt.Fprintf(os.Stderr, "\n=== round %d ===\n", n) }
+		obs.WorkerReply = func(_ int, text string) {
+			if loom.WorkerReportedComplete(text) {
+				fmt.Fprintln(os.Stderr, "  [worker] BUILD COMPLETE — the critic still judges the finished work")
+			}
+		}
+		obs.Verdict = func(_ int, verdict, feedback string) {
+			fmt.Fprintf(os.Stderr, "  [critic] VERDICT: %s\n", verdict)
+			if verdict == "REVISE" && feedback != "" {
+				fmt.Fprintf(os.Stderr, "  [critic] %s\n", oneLine(feedback, 200))
+			}
+		}
+	}
+	if events {
+		obs.WorkerEvent = func(ev loom.Event) { duoEvent("worker", ev) }
+		obs.CriticEvent = func(ev loom.Event) { duoEvent("critic", ev) }
+	}
+	return obs
+}
+
+// duoEvent prints one streamed tool event, tagged with the seat it came from.
+func duoEvent(who string, ev loom.Event) {
+	switch ev.Kind {
+	case loom.EvToolCall:
+		fmt.Fprintf(os.Stderr, "  [%s] → %s\n", who, ev.Tool)
+	case loom.EvToolResult:
+		fmt.Fprintf(os.Stderr, "  [%s] ← (tool result)\n", who)
+	case loom.EvThinking:
+		fmt.Fprintf(os.Stderr, "  [%s] · %s\n", who, oneLine(ev.Text, 100))
+	}
+}
+
+// emitDuo writes the duo outcome: one JSON object on stdout for programmatic callers, else
+// the worker's final report on stdout with the status, cost, and both resumable session ids
+// on stderr (matching `run`'s feel).
+func emitDuo(res loom.DuoResult, jsonOut bool) error {
+	if jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(res)
+	}
+	fmt.Println(res.Text)
+	fmt.Fprintf(os.Stderr, "[duo %s after %d round(s)]\n", res.Status, len(res.Rounds))
+	if res.CostUSD > 0 {
+		fmt.Fprintf(os.Stderr, "[duo $%.4f]\n", res.CostUSD)
+	}
+	if res.WorkerSession != "" {
+		fmt.Fprintf(os.Stderr, "[worker session %s — resume: loom run --resume %s ...]\n", res.WorkerSession, res.WorkerSession)
+	}
+	if res.CriticSession != "" {
+		fmt.Fprintf(os.Stderr, "[critic session %s — inspect: loom run --consult --resume %s ...]\n", res.CriticSession, res.CriticSession)
+	}
+	return nil
+}
+
 // serve: run loom as a websocket service — a client (another loom, a browser) drives
 // sessions over a socket with a token, instead of spawning subprocesses / ssh.
 func cmdServe(args []string) error {
@@ -839,6 +960,7 @@ usage:
   loom chat  --agent claude [--model M] [--dir D]              multi-turn (one msg per stdin line)
   loom panel  --agents claude,agy [--dir D] "prompt"           fan one prompt across agents (council)
   loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   review a diff or files
+  loom duo    --agent claude --critic-agent codex [--dir D] [--rounds 6] "task"   worker builds, critic judges each build point
   loom serve --listen 127.0.0.1:7777 --token-file ~/.loom/tokens [--add-token] [--idle-ttl 4h]   run loom as a ws service
   loom serve --listen 100.x.y.z:7777 --tls                     run loom over pinned mTLS (peers enrolled via loom pair)
   loom pair  --listen 100.x.y.z:7778                           wait for a pairing (one box)

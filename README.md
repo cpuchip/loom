@@ -58,6 +58,7 @@ loom chat  --agent claude --dir /path/to/repo                    # multi-turn: o
 loom run   --agent claude --clone https://github.com/org/repo.git "..." # clone into a fresh temp workdir
 loom panel  --agents local,claude "is this function correct?"    # cloud+local council: fan + compare
 loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   # review a git diff or files
+loom duo    --agent claude --critic-agent codex --dir /repo "build X"  # worker builds, critic (read-only) judges each build point
 loom run    --agent claude --isolate --dir /path/to/repo "..."   # claude in a docker sandbox (host walled off)
 loom run    --agent claude --remote cpuchip@box --dir /repo "..." # claude on another machine over ssh
 loom run    --agent claude --remote cpuchip@box --isolate --dir /repo "..." # sandboxed claude ON the remote box
@@ -74,6 +75,45 @@ race, and an incomplete `<think>`-stripper — the orphan `</think>` case a self
 `--events` makes loom **observable** — the agent's tool calls (`→ Glob`), tool results, and thinking
 stream to stderr as they happen, while the final answer comes back on stdout. Backends emit what they
 can: `claude` the full stream, `local`/`agy` a coarse one.
+
+## Duo — worker + critic build loop (`loom duo`)
+
+`loom duo` binds **two agents to one working directory**: a **worker** that builds and a **critic** that
+evaluates the worker's *trajectory* at every build point, with loom running the loop between them. It's
+trajectory eval made operational — a second, opposed seat checking the work as it's built, not after.
+
+```sh
+loom duo --agent claude --model sonnet \
+         --critic-agent codex --critic-model gpt-5.6-terra \
+         --dir /path/to/repo [--rounds 6] [--json] [--events] \
+         "build the thing"
+```
+
+The **build point is the turn boundary** — loom's per-turn exec model already gives a natural checkpoint
+after each reply. Each round is **worker turn → critic turn → route**:
+
+- The **worker** opens with your trust flags (exactly as `run`), works in coherent increments, and ends
+  each reply with a build-point report (what it did, what it *verified*, what's next). When the whole task
+  is done it begins a reply with `BUILD COMPLETE`.
+- The **critic** opens read-only (`--consult`) on the **same `--dir`**, so it inspects the real tree —
+  files, `git diff`, the tests — not just the worker's report (where the two disagree, the tree wins). It
+  ends every reply with `VERDICT: CONTINUE | REVISE | DONE`. Its session is **resumed each round**, so it
+  accumulates the whole trajectory — that memory is the point.
+- loom **routes** on the verdict: `REVISE` sends the critic's feedback back into the worker; `CONTINUE`
+  tells the worker to proceed; `DONE` ends the loop. `BUILD COMPLETE` does **not** end the loop by itself —
+  nothing outranks the check; only a critic `DONE` (or the `--rounds` cap) ends it. A garbled verdict fails
+  **open** (treated as `CONTINUE` with a warning to stderr) — the loop never wedges on the critic, only on
+  the tree.
+
+The two seats carry **opposed mandates** — the worker is driven to finish, the critic to distrust the
+finish — which is exactly why the pair catches the gap between "I built it" and "it works" that a single
+agent grading its own work cannot. The critic defaults to the worker's backend/model; point it at a
+**different** one (`--critic-agent`/`--critic-model`) for genuine second-eyes.
+
+`--json` emits one object: `{worker_session, critic_session, rounds:[{verdict, feedback_summary}…],
+status, text, cost_usd}`. Both session ids surface so either seat can be resumed or inspected afterward
+(`loom run --resume <id>`, `--consult` for the critic). `--events` streams both seats' tool calls to
+stderr, tagged `[worker]`/`[critic]`.
 
 ## Sessions — carry & resume
 
