@@ -179,6 +179,33 @@ func sessionMCPConfig(hostHome, baseInContainer, session string) (inContainer, h
 	return "/home/node/.claude/.session-mcp/" + filepath.Base(hostPath), hostPath
 }
 
+// effectiveMCPConfig decides whether a session actually receives the shim's
+// --mcp-config. The path is resolved INSIDE the session container, where a
+// home-anchored config (/home/node/.claude/<file>) exists only when that home is
+// mounted AND actually contains the file. Handing claude a --mcp-config it cannot
+// open makes it EXIT at startup ("Invalid MCP configuration: MCP config file not
+// found: …"), which the caller sees as the opaque "stream ended before a result
+// event (process exited?)". So for a home-anchored config, drop the hinge —
+// degrade to a toolless-but-working turn — unless the file is really present in
+// the mounted home. A bare "sonnet" (no home mounted) or a role home missing the
+// file loses tools, never the turn; this mirrors resolveModelHome's rule that a
+// config gap never fails a request, it just loses the specialization. A config
+// that is NOT home-anchored (e.g. an image-baked binary path) is passed through
+// untouched — loom cannot second-guess a path it does not own.
+func effectiveMCPConfig(cfg, home string) string {
+	base, anchored := strings.CutPrefix(cfg, "/home/node/.claude/")
+	if !anchored {
+		return cfg // empty, or an image-relative path loom can't verify — trust it
+	}
+	if home == "" {
+		return "" // no home mount → the anchored path can't exist in the container
+	}
+	if _, err := os.Stat(filepath.Join(home, base)); err != nil {
+		return "" // home mounted but the config file isn't in it → toolless, not a crash
+	}
+	return cfg
+}
+
 type openaiMessage struct {
 	Role    string          `json:"role"`
 	Content json.RawMessage `json:"content"` // string, or array of content parts
@@ -225,7 +252,7 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	// #333: a substrate dispatch declares its session in the standard `user`
 	// field — derive a per-session MCP config carrying it as a header, so the
 	// session's doc drafts scope to the work item. Fallback = static config.
-	mcpCfg := openaiMCPConfig
+	mcpCfg := effectiveMCPConfig(openaiMCPConfig, home)
 	if strings.HasPrefix(req.User, "wi--") {
 		if derived, host := sessionMCPConfig(home, openaiMCPConfig, req.User); derived != "" {
 			mcpCfg = derived

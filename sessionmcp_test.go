@@ -66,3 +66,38 @@ func TestSessionMCPConfig(t *testing.T) {
 		t.Error("empty session must fall back")
 	}
 }
+
+// effectiveMCPConfig gates a home-anchored --mcp-config on the config file
+// actually being present in the mounted home. A bare model (no home) or a home
+// missing the file must degrade to toolless ("") rather than hand claude a path
+// it can't open — which exits the process and surfaces as "stream ended before a
+// result event". A non-anchored path (image-baked) passes through untouched.
+func TestEffectiveMCPConfig(t *testing.T) {
+	home := t.TempDir()
+	anchored := "/home/node/.claude/stewards-mcp.json"
+
+	// home mounted but file NOT present yet → drop the hinge, don't crash.
+	if got := effectiveMCPConfig(anchored, home); got != "" {
+		t.Errorf("home without the config file: got %q, want \"\"", got)
+	}
+	// bare model (no home) → drop the hinge (the regression: bare sonnet crashed).
+	if got := effectiveMCPConfig(anchored, ""); got != "" {
+		t.Errorf("no home mount: got %q, want \"\"", got)
+	}
+	// file present in the mounted home → pass the anchored path through.
+	if err := os.WriteFile(filepath.Join(home, "stewards-mcp.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := effectiveMCPConfig(anchored, home); got != anchored {
+		t.Errorf("home with the config file: got %q, want %q", got, anchored)
+	}
+	// non-home-anchored path (e.g. an image-baked binary config) → untouched,
+	// even with no home, since loom can't verify a path it doesn't own.
+	if got := effectiveMCPConfig("/opt/mcp/config.json", ""); got != "/opt/mcp/config.json" {
+		t.Errorf("non-anchored path must pass through: got %q", got)
+	}
+	// empty config → empty (nothing to wire).
+	if got := effectiveMCPConfig("", home); got != "" {
+		t.Errorf("empty config: got %q, want \"\"", got)
+	}
+}
