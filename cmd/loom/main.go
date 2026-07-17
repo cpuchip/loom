@@ -802,11 +802,13 @@ func cmdServe(args []string) error {
 	openaiHomeRoot := fs.String("openai-home-root", "", "dir holding role-specific claude-homes (<root>/<role>-claude-home); a model named \"<model>#<role>\" (e.g. sonnet#critic) mounts that role's home. Lets one serve host purpose-built environments (critic, review, ...).")
 	openaiMCP := fs.String("openai-mcp-config", "", "--mcp-config JSON handed to every OpenAI-shim session: the hinge back into pg-ai-stewards (doc_*, doc_search, …). Isolated sessions run in a Linux container, so the config's server must be reachable from there (container-baked binary or http via host.docker.internal).")
 	openaiTimeout := fs.Duration("openai-timeout", 30*time.Minute, "wall-clock cap for ONE shim completion (session spawn → reply). Keep it ABOVE the caller's own client timeout — the session dies with the client connection, so the smaller of the two governs and a too-small pair silently restarts long sessions from zero on the caller's retry.")
+	openaiWarm := fs.Bool("openai-warm", false, "keep a WARM sticky seat: a `user:\"sticky:<name>\"` conversation's claude process/container stays alive between turns, so the next turn skips the ~2.5-3s cold spawn+--resume floor (voice companion). DEFAULT OFF — bare models and wi-- dispatches are never warm. Idle seats downgrade to cold-resumable on --idle-ttl; cap concurrent warm seats with LOOM_OPENAI_WARM_MAX (default 8).")
 	_ = fs.Parse(args)
 	loom.SetOpenAIClaudeHome(*openaiHome)
 	loom.SetOpenAIHomeRoot(*openaiHomeRoot)
 	loom.SetOpenAIMCPConfig(*openaiMCP)
 	loom.SetOpenAITimeout(*openaiTimeout)
+	loom.SetOpenAIWarm(*openaiWarm)
 	if *addToken {
 		if *tokenFile == "" {
 			return fmt.Errorf("serve --add-token: --token-file is required (that is where the token is appended)")

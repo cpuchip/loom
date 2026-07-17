@@ -738,6 +738,12 @@ func (s *server) reapOnce(now time.Time) {
 	for _, rs := range cands {
 		s.downgrade(rs, now)
 	}
+	// The OpenAI shim's warm sticky seats (openai_sticky.go) downgrade on the SAME
+	// idle TTL as ws residents. They live in a separate registry (never the ws
+	// byName/remembered maps), so they're reaped here rather than in the loop above.
+	if openaiWarm {
+		reapStickyWarm(now, s.idleTTL)
+	}
 }
 
 // downgrade closes an idle resident and remembers its lineage. It never downgrades a

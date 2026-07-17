@@ -260,35 +260,47 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// baseOpts is the per-turn session shape; only Resume varies (cold path) or is
+	// unused (warm path — the live process IS the continuation, no --resume).
+	baseOpts := SessionOpts{
+		Model:           bareModel, // loom passes --model straight through
+		Isolate:         true,      // clean sandbox per turn; no host-config bleed
+		SkipPermissions: true,
+		ClaudeHome:      home,
+		Workdir:         workdir, // role context ("" = serve's own cwd, the historical default)
+		WorkdirRO:       workdir != "",
+		MCPConfig:       mcpCfg, // hinge into pg-ai-stewards (doc_* etc.), if configured
+	}
 	open := func(resume string) (Session, error) {
-		return be.Open(ctx, SessionOpts{
-			Model:           bareModel, // loom passes --model straight through
-			Isolate:         true,      // clean sandbox per turn; no host-config bleed
-			SkipPermissions: true,
-			ClaudeHome:      home,
-			Workdir:         workdir, // role context ("" = serve's own cwd, the historical default)
-			WorkdirRO:       workdir != "",
-			MCPConfig:       mcpCfg, // hinge into pg-ai-stewards (doc_* etc.), if configured
-			Resume:          resume, // sticky conversations: continue the living session
-		})
+		o := baseOpts
+		o.Resume = resume // sticky cold path: continue the living session by id
+		return be.Open(ctx, o)
 	}
 
 	// Sticky conversations (user = "sticky:<name>", see openai_sticky.go): one
-	// living claude session per (model,user). The container is still per-turn;
-	// the session state persists in the mounted role home. Everything else
-	// keeps the historical fresh-per-turn semantics.
+	// living claude session per (model,user). Cold path — the container is
+	// per-turn, session state persists in the mounted role home, --resume carries
+	// the lineage. Warm path (--openai-warm) — the process/container is kept ALIVE
+	// between turns, so the next turn feeds straight in, skipping the spawn+--resume
+	// floor. Everything non-sticky keeps the historical fresh-per-turn semantics.
 	var entry *stickyEntry
 	resume := ""
+	useWarm := false
 	if key := stickyKeyFor(req.Model, req.User); key != "" {
 		entry = stickyFor(key)
-		entry.mu.Lock() // serialize turns within one conversation
+		entry.mu.Lock() // serialize turns within one conversation (held across the turn)
 		defer entry.mu.Unlock()
 		resume = entry.sessionID
+		useWarm = openaiWarm && entry.canServeWarm()
 	}
+	// The session already holds prior context when we have a lineage to resume OR a
+	// live warm seat; only then does the delta (messages after the last assistant)
+	// suffice — otherwise replay the full transcript.
+	hasContext := resume != "" || (entry != nil && entry.warm != nil)
 	prompt := flattenMessages(req.Messages)
-	if resume != "" {
+	if hasContext {
 		if d, ok := flattenDelta(req.Messages); ok {
-			prompt = d // the resumed session already holds the rest
+			prompt = d // the resumed/warm session already holds the rest
 		}
 	}
 
@@ -322,14 +334,24 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 		return sess.Send(ctx, p)
 	}
 
-	reply, err := runOnce(resume, prompt)
+	var reply Reply
+	var err error
+	if useWarm {
+		// Warm path: run on (or first establish) the live seat. A crash tears the
+		// seat down inside runStickyWarm and returns an error, which the cold
+		// fallback below catches — a warm crash degrades to cold, never fails.
+		reply, err = entry.runStickyWarm(be, baseOpts, resume, prompt, onEvent)
+	} else {
+		reply, err = runOnce(resume, prompt)
+	}
 	if err == nil && reply.Err != "" {
 		err = fmt.Errorf("%s", reply.Err)
 	}
-	// Resume fallback: the caller sends the FULL history every turn, so a dead
-	// session (file gone, home swapped) costs nothing — drop the mapping and
-	// replay the whole transcript into a fresh session, once. Only when no
-	// streamed bytes are out yet (a mid-stream failure can't be restarted).
+	// Resume/crash fallback: the caller sends the FULL history every turn, so a dead
+	// session (file gone, home swapped) OR a torn-down warm seat costs nothing —
+	// drop the mapping and replay the whole transcript into a fresh COLD session,
+	// once. Only when no streamed bytes are out yet (a mid-stream failure can't be
+	// restarted).
 	if err != nil && resume != "" && (sse == nil || !sse.started()) {
 		entry.sessionID = ""
 		reply, err = runOnce("", flattenMessages(req.Messages))
