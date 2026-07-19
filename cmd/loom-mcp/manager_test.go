@@ -153,6 +153,10 @@ func newTestManager(op opener, gt gate) *manager {
 	m := newManager(op, gt, &fakePlanner{}, 5, time.Minute, nil)
 	m.pollEvery = 2 * time.Millisecond
 	m.pollTimeout = 2 * time.Second
+	// Default to an empty CLI-worker table so tests never shell out to the real host
+	// process query; the cli-worker tests override these two hooks explicitly.
+	m.listCLI = func(context.Context) ([]cliWorker, error) { return nil, nil }
+	m.killCLI = func(int) error { return nil }
 	return m
 }
 
@@ -516,5 +520,115 @@ func TestKillMissReportsNotFound(t *testing.T) {
 	}
 	if kr.OK {
 		t.Fatal("a miss should report OK=false")
+	}
+}
+
+// --- CLI-worker merge + kill routing (the direct `loom run` fleet) ---
+
+// TestOverviewIncludesCLIWorkers proves the host's direct loom run workers are folded
+// into the overview as cli-worker entries, alongside commissions.
+func TestOverviewIncludesCLIWorkers(t *testing.T) {
+	m := newTestManager(&fakeOpener{}, newFakeGate())
+	m.listCLI = func(context.Context) ([]cliWorker, error) {
+		return []cliWorker{
+			{PID: 18652, Backend: "claude", Model: "sonnet", Dir: `C:/x/aud/t2-frontend/claude`},
+			{PID: 18777, Backend: "claude", Model: "sonnet", Dir: `C:/x/aud/t1-backend/claude`},
+		}, nil
+	}
+	if _, err := m.Open(context.Background(), openReq{purpose: "advise", writable: false}); err != nil {
+		t.Fatal(err)
+	}
+	ov := m.Overview(context.Background())
+	if ov.WorkersError != "" {
+		t.Fatalf("healthy scan should leave workers_error empty; got %q", ov.WorkersError)
+	}
+	n, targets := 0, map[string]bool{}
+	for _, e := range ov.Sessions {
+		if e.Kind == "cli-worker" {
+			n++
+			targets[e.Handle] = true
+			if e.Backend != "claude" || e.Model != "sonnet" {
+				t.Errorf("cli-worker backend/model = %q/%q, want claude/sonnet", e.Backend, e.Model)
+			}
+		}
+	}
+	if n != 2 {
+		t.Fatalf("want 2 cli-workers in the overview, got %d (%+v)", n, ov.Sessions)
+	}
+	if !targets["pid:18652"] || !targets["pid:18777"] {
+		t.Fatalf("cli-worker handles should be pid:<n>; got %v", targets)
+	}
+	// CLI workers must NOT consume commission slots.
+	if ov.Active != 1 {
+		t.Errorf("active = %d, want 1 (only the commission counts)", ov.Active)
+	}
+}
+
+// TestOverviewCLIWorkerScanErrorDegrades proves a failed process scan surfaces
+// workers_error but still lists everything else.
+func TestOverviewCLIWorkerScanErrorDegrades(t *testing.T) {
+	m := newTestManager(&fakeOpener{}, newFakeGate())
+	m.listCLI = func(context.Context) ([]cliWorker, error) { return nil, errors.New("powershell blew up") }
+	if _, err := m.Open(context.Background(), openReq{purpose: "advise", writable: false}); err != nil {
+		t.Fatal(err)
+	}
+	ov := m.Overview(context.Background())
+	if ov.WorkersError == "" {
+		t.Fatal("a failed scan should set workers_error")
+	}
+	if len(ov.Sessions) != 1 || ov.Sessions[0].Kind != "commission" {
+		t.Fatalf("the commission should still list when the scan fails; got %+v", ov.Sessions)
+	}
+}
+
+// TestKillRoutesCLIWorkerByPID proves a pid target force-kills the worker (and reports
+// kind=cli-worker), and that the recycled-PID guard is honored: the kill only fires
+// for a PID still present in the live scan.
+func TestKillRoutesCLIWorkerByPID(t *testing.T) {
+	m := newTestManager(&fakeOpener{}, newFakeGate())
+	m.listCLI = func(context.Context) ([]cliWorker, error) {
+		return []cliWorker{{PID: 4242, Backend: "local"}}, nil
+	}
+	var killedPID int
+	m.killCLI = func(pid int) error { killedPID = pid; return nil }
+
+	// Both "pid:<n>" and a bare integer route to the CLI kill.
+	for _, target := range []string{"pid:4242", "4242"} {
+		killedPID = 0
+		kr, err := m.Kill(context.Background(), target, "")
+		if err != nil {
+			t.Fatalf("%s: %v", target, err)
+		}
+		if !kr.OK || kr.Kind != "cli-worker" || !kr.Killed {
+			t.Fatalf("%s: kr = %+v, want ok cli-worker killed", target, kr)
+		}
+		if killedPID != 4242 {
+			t.Fatalf("%s: killCLI got pid %d, want 4242", target, killedPID)
+		}
+	}
+}
+
+// TestKillCLIWorkerRecycledPIDGuard proves a PID not in the live scan is refused —
+// never force-killing an innocent recycled PID.
+func TestKillCLIWorkerRecycledPIDGuard(t *testing.T) {
+	m := newTestManager(&fakeOpener{}, newFakeGate())
+	m.listCLI = func(context.Context) ([]cliWorker, error) {
+		return []cliWorker{{PID: 4242, Backend: "local"}}, nil // 9999 is NOT here
+	}
+	killed := false
+	m.killCLI = func(int) error { killed = true; return nil }
+
+	kr, err := m.Kill(context.Background(), "pid:9999", "")
+	if err != nil {
+		t.Fatalf("a guard miss should be a clean result, not an error: %v", err)
+	}
+	if kr.OK {
+		t.Fatal("killing a PID absent from the live scan must report OK=false")
+	}
+	if killed {
+		t.Fatal("the guard must prevent killCLI from firing on a recycled/absent PID")
+	}
+	if kr.Kind != "cli-worker" {
+		t.Errorf("kind = %q, want cli-worker (so the app knows what was attempted)", kr.Kind)
 	}
 }

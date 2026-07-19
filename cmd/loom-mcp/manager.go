@@ -163,6 +163,12 @@ type manager struct {
 	sendTimeout time.Duration
 	log         func(format string, args ...any)
 
+	// CLI-worker surface: list the host's direct `loom run` workers and force-kill
+	// one by PID. Injected so tests drive the merge + kill routing with no real
+	// process table; production wires the platform implementations.
+	listCLI func(ctx context.Context) ([]cliWorker, error)
+	killCLI func(pid int) error
+
 	mu       sync.Mutex
 	sessions map[string]*commission
 }
@@ -181,6 +187,8 @@ func newManager(op opener, gt gate, pl planner, maxSess int, sendTimeout time.Du
 		pollTimeout: 15 * time.Minute,
 		sendTimeout: sendTimeout,
 		log:         log,
+		listCLI:     listCLIWorkers,
+		killCLI:     killCLIWorker,
 		sessions:    map[string]*commission{},
 	}
 }
@@ -470,13 +478,24 @@ func (m *manager) Overview(ctx context.Context) overviewResult {
 		}
 	}
 
+	// Fold in the host's direct `loom run` CLI workers (the foreman's walk/audition
+	// seats), which touch neither loom-mcp nor the serve and so are absent above.
+	// These do not consume a commission slot, so they never touch active/max.
+	var workersErr string
+	if ws, err := m.listCLI(ctx); err != nil {
+		workersErr = err.Error()
+		m.log("overview: cli-worker scan failed: %v", err)
+	} else {
+		entries = append(entries, cliWorkerEntries(ws)...)
+	}
+
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].Kind != entries[j].Kind {
 			return entries[i].Kind < entries[j].Kind
 		}
 		return entries[i].Handle < entries[j].Handle
 	})
-	return overviewResult{Sessions: entries, Active: active, Max: m.maxSess, ServeError: serveErr}
+	return overviewResult{Sessions: entries, Active: active, Max: m.maxSess, ServeError: serveErr, WorkersError: workersErr}
 }
 
 // Kill is the generalized e-stop by name OR handle. A handle loom-mcp owns (a
@@ -489,6 +508,12 @@ func (m *manager) Kill(ctx context.Context, target, reason string) (killResult, 
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return killResult{}, fmt.Errorf("target is required — the handle or name to stop")
+	}
+	// A "pid:<n>" (or bare integer) target is a direct CLI worker — force-kill its
+	// process tree. Checked first: commission handles ("commission-…") and serve
+	// handles are never integers, so this can't shadow them.
+	if pid, ok := parsePIDTarget(target); ok {
+		return m.killCLIWorkerTarget(ctx, pid, target)
 	}
 	if c := m.get(target); c != nil {
 		cr, err := m.Close(ctx, target, reason)
@@ -507,6 +532,34 @@ func (m *manager) Kill(ctx context.Context, target, reason string) (killResult, 
 			Message: "No commissioned session, resident, or warm seat matched \"" + target + "\"."}, nil
 	}
 	return killResult{OK: true, Kind: kind, Target: target, Killed: true, Message: note}, nil
+}
+
+// killCLIWorkerTarget force-stops a direct CLI worker by PID. It first RE-LISTS the
+// live workers and confirms the PID is still one of them — a recycled PID must never
+// take down an innocent process. On a confirmed hit it force-kills the tree and
+// returns a strong, plain-spoken warning of what it just did (irreversible; the
+// worker was mid-task).
+func (m *manager) killCLIWorkerTarget(ctx context.Context, pid int, target string) (killResult, error) {
+	ws, err := m.listCLI(ctx)
+	if err != nil {
+		return killResult{}, fmt.Errorf("verify cli worker before kill: %w", err)
+	}
+	var found *cliWorker
+	for i := range ws {
+		if ws[i].PID == pid {
+			found = &ws[i]
+			break
+		}
+	}
+	if found == nil {
+		return killResult{OK: false, Kind: "cli-worker", Target: target,
+			Message: fmt.Sprintf("No live `loom run` worker with PID %d — it may have already finished (or the PID was reused). Nothing was killed.", pid)}, nil
+	}
+	if err := m.killCLI(pid); err != nil {
+		return killResult{}, fmt.Errorf("stop cli worker %d: %w", pid, err)
+	}
+	return killResult{OK: true, Kind: "cli-worker", Target: target, Killed: true,
+		Message: fmt.Sprintf("Force-stopped CLI worker PID %d (%s). %s", pid, backendModel(*found), cliWorkerKillWarning)}, nil
 }
 
 // idleSince returns whole seconds since t, or 0 if t is unset.

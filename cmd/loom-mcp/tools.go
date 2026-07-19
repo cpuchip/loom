@@ -96,10 +96,10 @@ type turnView struct {
 }
 
 // overviewEntry is one live session anywhere on the box: a loom-mcp commission,
-// a serve ws resident, or a warm sticky seat. Kind tells them apart; Handle is
-// the kill target for any of them.
+// a serve ws resident, a warm sticky seat, or a direct `loom run` CLI worker. Kind
+// tells them apart; Handle is the kill target for any of them.
 type overviewEntry struct {
-	Kind        string     `json:"kind"` // "commission" | "resident" | "warm-seat"
+	Kind        string     `json:"kind"` // "commission" | "resident" | "warm-seat" | "cli-worker"
 	Handle      string     `json:"handle"`
 	Name        string     `json:"name,omitempty"`
 	Purpose     string     `json:"purpose,omitempty"`
@@ -116,10 +116,11 @@ type overviewEntry struct {
 }
 
 type overviewResult struct {
-	Sessions   []overviewEntry `json:"sessions"`
-	Active     int             `json:"active"`
-	Max        int             `json:"max"`
-	ServeError string          `json:"serve_error,omitempty"` // non-empty if the serve query failed (commissions still listed)
+	Sessions     []overviewEntry `json:"sessions"`
+	Active       int             `json:"active"`
+	Max          int             `json:"max"`
+	ServeError   string          `json:"serve_error,omitempty"`   // non-empty if the serve query failed (commissions still listed)
+	WorkersError string          `json:"workers_error,omitempty"` // non-empty if the CLI-worker process scan failed (everything else still listed)
 }
 
 // fromServeOverview maps a serve-reported session (resident or warm seat) into
@@ -152,7 +153,7 @@ func serveKindNote(kind string) string {
 }
 
 type SessionKillInput struct {
-	Target string `json:"target" jsonschema:"the session to stop — a commission handle, a resident name/handle, or a warm-seat name/handle (from sessions_overview)"`
+	Target string `json:"target" jsonschema:"the session to stop — a commission handle, a resident name/handle, a warm-seat name/handle, or a CLI worker's pid target \"pid:<n>\" (all from sessions_overview)"`
 	Reason string `json:"reason,omitempty" jsonschema:"optional reason recorded on a commission"`
 }
 
@@ -221,24 +222,28 @@ func registerTools(s *mcp.Server, m *manager) {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "sessions_overview",
-		Description: "The WHOLE-BOX view: every live loom session on this serve — loom-mcp commissions, ws " +
-			"residents (named warm seats), AND the OpenAI-shim warm sticky seats (e.g. the voice companion) — " +
-			"each with its kind, model/backend, state, idle time, and a short recent chat tail to glance at. " +
+		Description: "The WHOLE-BOX view: every live loom session on this box — loom-mcp commissions, ws " +
+			"residents (named warm seats), the OpenAI-shim warm sticky seats (e.g. the voice companion), AND " +
+			"the direct `loom run` CLI workers a foreman launched on this box (kind=\"cli-worker\") — each with " +
+			"its kind, model/backend, state, idle time, and a short recent chat tail to glance at. " +
 			"Use this to SEE what is running before deciding to stop any of it; each entry's `handle` is the " +
-			"target for session_kill. (Commissions show their full purpose + recent turns; warm seats carry no " +
-			"transcript — the shim keeps none.) If the serve is unreachable, commissions still list and " +
-			"`serve_error` is set.",
+			"target for session_kill. (Commissions show their full purpose + recent turns; warm seats and " +
+			"cli-workers carry NO transcript — loom-mcp doesn't drive them.) If the serve is unreachable, " +
+			"commissions + CLI workers still list and `serve_error` is set; if the process scan fails, everything " +
+			"else still lists and `workers_error` is set.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ SessionsOverviewInput) (*mcp.CallToolResult, overviewResult, error) {
 		return nil, m.Overview(ctx), nil
 	})
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "session_kill",
-		Description: "Stop ANY loom session on this serve by name or handle — the generalized e-stop. A commission " +
+		Description: "Stop ANY loom session on this box by name, handle, or pid — the generalized e-stop. A commission " +
 			"is killed (seat dropped, pending tap withdrawn, scratch cleaned); a ws resident is closed (process " +
 			"dropped, remembered lineage cleared); a warm sticky seat is DOWNGRADED to cold-resumable (its live " +
-			"process torn down but its conversation lineage kept, so it can resume cold). Pass a `target` from " +
-			"sessions_overview. Reports what kind was stopped and the exact semantics applied.",
+			"process torn down but its conversation lineage kept, so it can resume cold); a direct CLI worker " +
+			"(target \"pid:<n>\") is FORCE-KILLED with its agent subprocess tree — irreversible, mid-task, so " +
+			"confirm before calling it. Pass a `target` from sessions_overview. Reports what kind was stopped and " +
+			"the exact semantics applied.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SessionKillInput) (*mcp.CallToolResult, killResult, error) {
 		res, err := m.Kill(ctx, in.Target, in.Reason)
 		if err != nil {
