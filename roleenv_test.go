@@ -55,8 +55,8 @@ func TestResolveModelHomeRoleWorkdir(t *testing.T) {
 // A read-only workdir mounts as /work:ro; the default stays writable (the
 // harness_run exfil channel depends on rw).
 func TestDockerArgsWorkdirRO(t *testing.T) {
-	rw := dockerArgs("C:/ws", false, "", "", "", []string{"-p", "hi"})
-	ro := dockerArgs("C:/ws", true, "", "", "", []string{"-p", "hi"})
+	rw := dockerArgs("C:/ws", false, "", "", "", nil, []string{"-p", "hi"})
+	ro := dockerArgs("C:/ws", true, "", "", "", nil, []string{"-p", "hi"})
 	if !slices.Contains(rw, "C:/ws:/work") || slices.Contains(rw, "C:/ws:/work:ro") {
 		t.Errorf("rw mount wrong: %v", rw)
 	}
@@ -69,5 +69,37 @@ func TestDockerArgsWorkdirRO(t *testing.T) {
 		if !strings.Contains(joined, "-w /work") {
 			t.Errorf("missing -w /work: %v", args)
 		}
+	}
+}
+
+// ExtraMounts add writable islands ALONGSIDE /work — the grounding shape loom-mcp
+// commissions: /work read-only for the workspace, plus a build dir and a scratch dir
+// the seat can actually write to. Each entry is passed through verbatim as a -v value.
+func TestDockerArgsExtraMounts(t *testing.T) {
+	islands := []string{
+		"C:/commissions/abc/work:/commission",
+		"C:/commissions/abc/scratch:/scratch",
+	}
+	got := dockerArgs("C:/ws", true, "", "", "", islands, []string{"-p", "hi"})
+	joined := strings.Join(got, " ")
+	// /work is still there and read-only (grounding is not sacrificed for the islands).
+	if !slices.Contains(got, "C:/ws:/work:ro") {
+		t.Errorf("workspace /work:ro mount missing with extra mounts: %v", got)
+	}
+	// each island appears as its own -v value.
+	for _, m := range islands {
+		if !slices.Contains(got, m) {
+			t.Errorf("extra mount %q not present: %v", m, got)
+		}
+	}
+	// a -v precedes each island (they are real bind mounts, not stray args).
+	for _, m := range islands {
+		if !strings.Contains(joined, "-v "+m) {
+			t.Errorf("extra mount %q not introduced by -v: %v", m, joined)
+		}
+	}
+	// empty entries are skipped, never emitted as a bare -v "".
+	if n := dockerArgs("C:/ws", false, "", "", "", []string{"", "  "}, nil); slices.Contains(n, "") {
+		t.Errorf("empty extra mount should be skipped, got %v", n)
 	}
 }

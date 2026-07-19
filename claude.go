@@ -345,7 +345,7 @@ func resolveClaudeBin(bin string) string {
 // as the container's WRITABLE ~/.claude — skills, instructions, settings, MCP, AND
 // persisted session state (so a later --resume container reattaches). The creds are
 // still layered read-only on top, so auth works without copying secrets into the home.
-func dockerArgs(wd string, wdRO bool, creds, claudeHome, image string, claudeArgs []string) []string {
+func dockerArgs(wd string, wdRO bool, creds, claudeHome, image string, extraMounts, claudeArgs []string) []string {
 	if image == "" {
 		image = "loom-claude"
 	}
@@ -360,6 +360,14 @@ func dockerArgs(wd string, wdRO bool, creds, claudeHome, image string, claudeArg
 		wdMount += ":ro" // context-only seat: /work is reference material, never an exfil channel
 	}
 	a = append(a, "-v", wdMount, "-w", "/work")
+	// Extra bind mounts (loom-mcp's writable islands: a build dir, a scratch/journal
+	// dir) layer on top of /work — each is a raw `-v host:container[:ro]` value, so a
+	// seat can ground on the whole workspace at /work:ro yet still WRITE to its islands.
+	for _, m := range extraMounts {
+		if m = strings.TrimSpace(m); m != "" {
+			a = append(a, "-v", m)
+		}
+	}
 	if creds != "" {
 		a = append(a, "-v", creds+":"+claudeDir+"/.credentials.json:ro")
 	}
@@ -380,7 +388,7 @@ func dockerRunArgs(opts SessionOpts, claudeArgs []string) []string {
 	if opts.ClaudeHome != "" {
 		claudeHome = dockerVol(opts.ClaudeHome)
 	}
-	return dockerArgs(dockerVol(wd), opts.WorkdirRO, dockerVol(creds), claudeHome, opts.Image, claudeArgs)
+	return dockerArgs(dockerVol(wd), opts.WorkdirRO, dockerVol(creds), claudeHome, opts.Image, opts.ExtraMounts, claudeArgs)
 }
 
 // remoteDockerArgs sandboxes claude on the REMOTE box (for --remote --isolate). The
@@ -394,7 +402,7 @@ func remoteDockerArgs(opts SessionOpts, claudeArgs []string) []string {
 	if wd == "" {
 		wd = "$HOME"
 	}
-	return dockerArgs(wd, opts.WorkdirRO, "$HOME/.claude/.credentials.json", opts.ClaudeHome, opts.Image, claudeArgs)
+	return dockerArgs(wd, opts.WorkdirRO, "$HOME/.claude/.credentials.json", opts.ClaudeHome, opts.Image, opts.ExtraMounts, claudeArgs)
 }
 
 // dockerVol normalizes a host path for a Docker bind mount (C:\path → C:/path,

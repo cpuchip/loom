@@ -24,8 +24,18 @@ type SessionOpts struct {
 	Model     string // backend-specific model override ("" = default)
 	Isolate   bool   // run the agent in a docker sandbox (claude backend) — walls the host
 	Image     string // docker image for isolation ("" = loom-claude)
-	Remote    string // run the agent on a remote box over ssh (e.g. "cpuchip@host"); "" = local
-	Resume    string // resume a prior session by id (claude --resume); "" = fresh session
+	// ExtraMounts adds docker bind mounts BEYOND the single /work + ~/.claude the
+	// sandbox gives by default (claude backend + Isolate only). Each entry is a raw
+	// `docker run -v` value — "host:container" or "host:container:ro" — with the host
+	// path already in the target platform's form (forward-slashed for Docker Desktop
+	// on Windows; $HOME-relative for a remote). This is what lets a seat ground on the
+	// whole workspace at /work READ-ONLY while still having WRITABLE islands (a build
+	// dir, a scratch/journal dir) at their own paths — the shape loom-mcp commissions.
+	// An older serve that predates this field ignores it (unknown JSON), degrading to
+	// the single-/work mount, never erroring.
+	ExtraMounts []string
+	Remote      string // run the agent on a remote box over ssh (e.g. "cpuchip@host"); "" = local
+	Resume      string // resume a prior session by id (claude --resume); "" = fresh session
 
 	// Configuring the claude agent — the substrate-integration surface. Paths in the
 	// config-file fields are interpreted on the TARGET (local host / remote box /

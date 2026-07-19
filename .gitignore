@@ -2,6 +2,8 @@
 /loom
 /loom.exe
 *.exe
+*.exe~
+*.bak
 *.test
 
 # scratch
