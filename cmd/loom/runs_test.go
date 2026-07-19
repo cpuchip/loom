@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/cpuchip/loom"
 )
 
 func TestRunStatus(t *testing.T) {
@@ -28,7 +30,7 @@ func TestRunStatus(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := runStatus(c.m, c.sentinel, now); got != c.want {
+			if got := loom.RunStatus(c.m, c.sentinel, now); got != c.want {
 				t.Errorf("runStatus = %q, want %q", got, c.want)
 			}
 		})

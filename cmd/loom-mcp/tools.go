@@ -110,8 +110,10 @@ type overviewEntry struct {
 	HingeID     int64      `json:"hinge_id,omitempty"`
 	AgeSeconds  int        `json:"age_seconds,omitempty"`
 	IdleSeconds int        `json:"idle_seconds,omitempty"`
-	Tail        string     `json:"tail,omitempty"`  // most recent reply text (a glance)
-	Turns       []turnView `json:"turns,omitempty"` // recent chat tail (commissions)
+	Tail        string     `json:"tail,omitempty"`     // most recent reply text (a glance) — commissions/warm seats; a cli-worker's log tail
+	Turns       []turnView `json:"turns,omitempty"`    // recent chat tail (commissions)
+	RunID       string     `json:"run_id,omitempty"`   // cli-worker: the correlated `loom run` lifecycle record id (empty = no confident match)
+	CostUSD     float64    `json:"cost_usd,omitempty"` // cli-worker: manifest usage — stamped in only at run finish, so ~always absent while live
 	Note        string     `json:"note,omitempty"`
 }
 
@@ -227,10 +229,13 @@ func registerTools(s *mcp.Server, m *manager) {
 			"the direct `loom run` CLI workers a foreman launched on this box (kind=\"cli-worker\") — each with " +
 			"its kind, model/backend, state, idle time, and a short recent chat tail to glance at. " +
 			"Use this to SEE what is running before deciding to stop any of it; each entry's `handle` is the " +
-			"target for session_kill. (Commissions show their full purpose + recent turns; warm seats and " +
-			"cli-workers carry NO transcript — loom-mcp doesn't drive them.) If the serve is unreachable, " +
-			"commissions + CLI workers still list and `serve_error` is set; if the process scan fails, everything " +
-			"else still lists and `workers_error` is set.",
+			"target for session_kill. (Commissions show their full purpose + recent turns. A cli-worker " +
+			"correlated to its `loom run` lifecycle record carries `run_id`, a `tail` of its recent output, " +
+			"and a `state` of \"running\" or \"heartbeat-stale\" — a stale heartbeat means the worker may be " +
+			"WEDGED; use `loom runs tail <run_id>` for its full log. A cli-worker with no matching record, and " +
+			"warm seats, carry no transcript.) If the serve is unreachable, commissions + CLI workers still " +
+			"list and `serve_error` is set; if the process scan fails, everything else still lists and " +
+			"`workers_error` is set.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ SessionsOverviewInput) (*mcp.CallToolResult, overviewResult, error) {
 		return nil, m.Overview(ctx), nil
 	})

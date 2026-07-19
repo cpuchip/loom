@@ -163,11 +163,13 @@ type manager struct {
 	sendTimeout time.Duration
 	log         func(format string, args ...any)
 
-	// CLI-worker surface: list the host's direct `loom run` workers and force-kill
-	// one by PID. Injected so tests drive the merge + kill routing with no real
-	// process table; production wires the platform implementations.
-	listCLI func(ctx context.Context) ([]cliWorker, error)
-	killCLI func(pid int) error
+	// CLI-worker surface: list the host's direct `loom run` workers, correlate each to
+	// its run-lifecycle record (for a transcript tail + status), and force-kill one by
+	// PID. Injected so tests drive the merge + kill routing with no real process table
+	// or filesystem; production wires the platform + real-runs-dir implementations.
+	listCLI   func(ctx context.Context) ([]cliWorker, error)
+	killCLI   func(pid int) error
+	correlate func(w cliWorker) (runCorrelation, bool)
 
 	mu       sync.Mutex
 	sessions map[string]*commission
@@ -189,7 +191,10 @@ func newManager(op opener, gt gate, pl planner, maxSess int, sendTimeout time.Du
 		log:         log,
 		listCLI:     listCLIWorkers,
 		killCLI:     killCLIWorker,
-		sessions:    map[string]*commission{},
+		correlate: func(w cliWorker) (runCorrelation, bool) {
+			return correlateWorker(w, loom.RunsDir(), time.Now())
+		},
+		sessions: map[string]*commission{},
 	}
 }
 
@@ -486,7 +491,7 @@ func (m *manager) Overview(ctx context.Context) overviewResult {
 		workersErr = err.Error()
 		m.log("overview: cli-worker scan failed: %v", err)
 	} else {
-		entries = append(entries, cliWorkerEntries(ws)...)
+		entries = append(entries, cliWorkerEntries(ws, m.correlate)...)
 	}
 
 	sort.Slice(entries, func(i, j int) bool {

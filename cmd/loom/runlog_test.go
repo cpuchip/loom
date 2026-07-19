@@ -98,7 +98,7 @@ func TestRecorderLifecycle(t *testing.T) {
 	if m.Turns != 2 || m.SessionID != "sess-1" || m.CostUSD == 0 {
 		t.Errorf("usage not recorded: %+v", m)
 	}
-	sent, err := readSentinel(rec.dir)
+	sent, err := loom.ReadSentinel(rec.dir)
 	if err != nil || sent == nil {
 		t.Fatalf("done sentinel: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestRecorderFinishFailed(t *testing.T) {
 		t.Fatalf("newRunRecorder: %v", err)
 	}
 	rec.finish(fakeErr("boom"), loom.Reply{})
-	sent, err := readSentinel(rec.dir)
+	sent, err := loom.ReadSentinel(rec.dir)
 	if err != nil || sent == nil || sent.Status != "failed" {
 		t.Fatalf("want failed sentinel, got %+v (err %v)", sent, err)
 	}

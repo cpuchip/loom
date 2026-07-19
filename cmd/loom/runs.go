@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,14 +64,14 @@ func gatherRuns(root string, now time.Time) ([]runRow, error) {
 			continue
 		}
 		dir := filepath.Join(root, e.Name())
-		man, err := readManifest(dir)
+		man, err := loom.ReadManifest(dir)
 		if err != nil {
 			continue
 		}
-		sent, _ := readSentinel(dir)
+		sent, _ := loom.ReadSentinel(dir)
 		rows = append(rows, runRow{
 			man:    man,
-			status: runStatus(man, sent, now),
+			status: loom.RunStatus(man, sent, now),
 			age:    now.Sub(man.StartedAt),
 			note:   dir,
 		})
@@ -81,49 +80,10 @@ func gatherRuns(root string, now time.Time) ([]runRow, error) {
 	return rows, nil
 }
 
-// runStatus derives the operable status of a run from its manifest + optional done
-// sentinel. The ordering matters: a written sentinel or finished_at is terminal; only an
-// OPEN run (neither) is judged by heartbeat freshness — a stale heartbeat with no
-// finish is the machine-readable "the wrapper died" verdict.
-func runStatus(m runManifest, sentinel *doneSentinel, now time.Time) string {
-	if sentinel != nil {
-		if sentinel.Status == "failed" {
-			return "failed"
-		}
-		return "done"
-	}
-	if m.FinishedAt != nil {
-		if m.ExitError != "" {
-			return "failed"
-		}
-		return "done"
-	}
-	if now.Sub(m.HeartbeatAt) > heartbeatStaleAfter {
-		return "heartbeat-stale"
-	}
-	return "running"
-}
-
-func readManifest(dir string) (runManifest, error) {
-	var m runManifest
-	b, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
-	if err != nil {
-		return m, err
-	}
-	return m, json.Unmarshal(b, &m)
-}
-
-func readSentinel(dir string) (*doneSentinel, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "done"))
-	if err != nil {
-		return nil, err
-	}
-	var s doneSentinel
-	if err := json.Unmarshal(b, &s); err != nil {
-		return nil, err
-	}
-	return &s, nil
-}
+// runStatus, manifest reads, and the stale-heartbeat threshold now live in loom's core
+// (runmanifest.go) so the `loom runs` history view and loom-mcp's live-worker correlation
+// derive status from one shared implementation. See loom.RunStatus / loom.ReadManifest /
+// loom.ReadSentinel, used by gatherRuns above.
 
 func tailRun(id string) error {
 	dir := filepath.Join(loom.RunsDir(), id)

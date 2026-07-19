@@ -154,9 +154,11 @@ func newTestManager(op opener, gt gate) *manager {
 	m.pollEvery = 2 * time.Millisecond
 	m.pollTimeout = 2 * time.Second
 	// Default to an empty CLI-worker table so tests never shell out to the real host
-	// process query; the cli-worker tests override these two hooks explicitly.
+	// process query, and a no-op correlator so they never touch the real runs dir; the
+	// cli-worker tests override these hooks explicitly.
 	m.listCLI = func(context.Context) ([]cliWorker, error) { return nil, nil }
 	m.killCLI = func(int) error { return nil }
+	m.correlate = func(cliWorker) (runCorrelation, bool) { return runCorrelation{}, false }
 	return m
 }
 
@@ -561,6 +563,44 @@ func TestOverviewIncludesCLIWorkers(t *testing.T) {
 	// CLI workers must NOT consume commission slots.
 	if ov.Active != 1 {
 		t.Errorf("active = %d, want 1 (only the commission counts)", ov.Active)
+	}
+}
+
+// TestOverviewCorrelatesCLIWorkers proves the correlate hook flows through Overview: a
+// matched worker's card carries its run-id, transcript tail, derived status, and usage.
+func TestOverviewCorrelatesCLIWorkers(t *testing.T) {
+	m := newTestManager(&fakeOpener{}, newFakeGate())
+	m.listCLI = func(context.Context) ([]cliWorker, error) {
+		return []cliWorker{{PID: 18652, Backend: "claude", Model: "sonnet", Dir: `C:/x/aud/t2/claude`}}, nil
+	}
+	m.correlate = func(w cliWorker) (runCorrelation, bool) {
+		if w.PID == 18652 {
+			return runCorrelation{RunID: "20260719-013000-bbb", Status: "heartbeat-stale",
+				Tail: "→ tool: Bash\nassistant: mid-turn", CostUSD: 0.19}, true
+		}
+		return runCorrelation{}, false
+	}
+	ov := m.Overview(context.Background())
+	var e *overviewEntry
+	for i := range ov.Sessions {
+		if ov.Sessions[i].Kind == "cli-worker" {
+			e = &ov.Sessions[i]
+		}
+	}
+	if e == nil {
+		t.Fatal("cli-worker missing from overview")
+	}
+	if e.RunID != "20260719-013000-bbb" {
+		t.Errorf("run_id = %q, want the correlated id", e.RunID)
+	}
+	if e.State != "heartbeat-stale" {
+		t.Errorf("state = %q, want the derived heartbeat-stale status", e.State)
+	}
+	if e.Tail == "" {
+		t.Error("a correlated cli-worker must carry its transcript tail")
+	}
+	if e.CostUSD != 0.19 {
+		t.Errorf("cost = %v, want 0.19", e.CostUSD)
 	}
 }
 

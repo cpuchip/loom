@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cpuchip/loom"
 )
 
 // cliWorker is one local `loom run` process discovered on the host — a worker
@@ -202,28 +204,51 @@ func baseName(p string) string {
 
 // cliWorkerEntries maps discovered workers into unified overview entries. The kill
 // target is "pid:<n>"; the name is the task/corpus dir's basename when known (so the
-// phone shows "t2-frontend", not three identical "loom run" rows).
-func cliWorkerEntries(ws []cliWorker) []overviewEntry {
+// phone shows "t2-frontend", not three identical "loom run" rows). When a correlate hook
+// is supplied, each worker is matched to its `loom run` lifecycle record: on a confident
+// match the card gains the run-id, a transcript tail (rendered by the app exactly like a
+// commission's single-string tail), the derived status (running / heartbeat-stale), and
+// usage if the manifest carries it. A worker with no confident match keeps the honest
+// no-transcript note and the plain "running" state — the graceful fallback.
+func cliWorkerEntries(ws []cliWorker, correlate func(cliWorker) (runCorrelation, bool)) []overviewEntry {
 	out := make([]overviewEntry, 0, len(ws))
 	for _, w := range ws {
-		age := 0
-		if !w.StartedAt.IsZero() {
-			if s := int(time.Since(w.StartedAt).Seconds()); s > 0 {
-				age = s
-			}
-		}
-		out = append(out, overviewEntry{
+		e := overviewEntry{
 			Kind:       "cli-worker",
 			Handle:     pidHandle(w.PID),
 			Name:       cliWorkerName(w),
 			Backend:    w.Backend,
 			Model:      w.Model,
-			State:      "running", // a loom run process is executing its single turn
-			AgeSeconds: age,
-			Note:       cliWorkerNote(w),
-		})
+			State:      "running", // default: a loom run process is executing its single turn
+			AgeSeconds: cliWorkerAge(w),
+		}
+		if correlate != nil {
+			if c, ok := correlate(w); ok {
+				e.RunID = c.RunID
+				e.State = c.Status // running | heartbeat-stale (the wedged signal)
+				e.Tail = c.Tail
+				e.CostUSD = c.CostUSD
+				e.Note = cliWorkerNoteCorrelated(w, c)
+				out = append(out, e)
+				continue
+			}
+		}
+		e.Note = cliWorkerNoteUncorrelated(w)
+		out = append(out, e)
 	}
 	return out
+}
+
+// cliWorkerAge is whole seconds since the worker process started, or 0 if the platform
+// did not report a creation time.
+func cliWorkerAge(w cliWorker) int {
+	if w.StartedAt.IsZero() {
+		return 0
+	}
+	if s := int(time.Since(w.StartedAt).Seconds()); s > 0 {
+		return s
+	}
+	return 0
 }
 
 // pidHandle is the self-describing kill target for a CLI worker.
@@ -239,11 +264,34 @@ func cliWorkerName(w cliWorker) string {
 	return "loom run worker"
 }
 
-// cliWorkerNote states plainly that there is NO transcript (loom-mcp does not drive
-// these), and carries the force-kill consequence so the app can show it at confirm time.
-func cliWorkerNote(w cliWorker) string {
-	n := fmt.Sprintf("CLI worker (loom run, PID %d) — loom-mcp does not drive it, so there is NO transcript to show. %s",
+// cliWorkerNoteCorrelated annotates a worker matched to its `loom run` record: it names
+// the run-id (so a human can `loom runs tail <id>` for the full log), flags a stale
+// heartbeat as the "may be wedged" signal, and still carries the force-kill consequence so
+// the app can show it at confirm time.
+func cliWorkerNoteCorrelated(w cliWorker, c runCorrelation) string {
+	var n string
+	if c.Status == "heartbeat-stale" {
+		n = fmt.Sprintf("CLI worker (loom run, PID %d) — run %s. Its heartbeat is stale (no beat in >%ds): the worker may be WEDGED or its wrapper died. %s",
+			w.PID, c.RunID, int(loom.HeartbeatStaleAfter.Seconds()), cliWorkerKillWarning)
+	} else {
+		n = fmt.Sprintf("CLI worker (loom run, PID %d) — run %s, live. %s",
+			w.PID, c.RunID, cliWorkerKillWarning)
+	}
+	return appendConnect(n, w)
+}
+
+// cliWorkerNoteUncorrelated is the honest fallback when no `loom run` record matches the
+// worker's PID — it predates lifecycle logging, its run dir is gone, or the only PID match
+// failed the recycled-PID guard. There is no transcript to show; the kill consequence still
+// applies.
+func cliWorkerNoteUncorrelated(w cliWorker) string {
+	n := fmt.Sprintf("CLI worker (loom run, PID %d) — no matching run record found (it predates lifecycle logging, or its run dir is unavailable), so there is no transcript to show. %s",
 		w.PID, cliWorkerKillWarning)
+	return appendConnect(n, w)
+}
+
+// appendConnect adds the remote-serve suffix when the worker drives one.
+func appendConnect(n string, w cliWorker) string {
 	if strings.TrimSpace(w.Connect) != "" {
 		n += " (drives a remote serve at " + w.Connect + ")"
 	}

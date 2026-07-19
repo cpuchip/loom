@@ -33,35 +33,12 @@ import (
 
 const heartbeatInterval = 30 * time.Second
 
-// heartbeatStaleAfter is how long without a heartbeat marks a still-open run as
-// "heartbeat-stale" (probably a dead wrapper). Three missed beats.
-const heartbeatStaleAfter = 95 * time.Second
-
-// runManifest is the crash-legible lifecycle record for one `loom run`.
-type runManifest struct {
-	RunID       string     `json:"run_id"`
-	StartedAt   time.Time  `json:"started_at"`
-	Argv        []string   `json:"argv"`
-	Cwd         string     `json:"cwd"`
-	Backend     string     `json:"backend"`
-	Model       string     `json:"model,omitempty"`
-	WrapperPID  int        `json:"wrapper_pid"`
-	ChildPIDs   []int      `json:"child_pids,omitempty"`
-	HeartbeatAt time.Time  `json:"heartbeat_at"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
-	ExitError   string     `json:"exit_error,omitempty"`
-	CostUSD     float64    `json:"cost_usd,omitempty"`
-	Turns       int        `json:"turns,omitempty"`
-	SessionID   string     `json:"session_id,omitempty"`
-}
-
-// doneSentinel is the tiny JSON written to the `done` file on a graceful exit.
-type doneSentinel struct {
-	RunID      string    `json:"run_id"`
-	Status     string    `json:"status"` // "ok" | "failed"
-	FinishedAt time.Time `json:"finished_at"`
-	ExitError  string    `json:"exit_error,omitempty"`
-}
+// runManifest and doneSentinel are the run-lifecycle records. Their fields and JSON tags
+// live in loom's core (runmanifest.go) as the SHARED on-disk contract with the readers
+// (`loom runs` here, and loom-mcp's live-worker correlation) — these aliases keep the
+// wrapper's local write code terse while there is exactly one definition to drift from.
+type runManifest = loom.RunManifest
+type doneSentinel = loom.DoneSentinel
 
 type runRecorder struct {
 	dir  string

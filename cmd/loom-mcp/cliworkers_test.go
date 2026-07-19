@@ -46,11 +46,11 @@ func TestParseRealServeIsNotAWorker(t *testing.T) {
 
 func TestParseFlagForms(t *testing.T) {
 	cases := []struct {
-		name          string
-		cmd           string
-		backend       string
-		model         string
-		wantIsWorker  bool
+		name         string
+		cmd          string
+		backend      string
+		model        string
+		wantIsWorker bool
 	}{
 		{"double-dash space", `loom.exe run --agent codex --model gpt-5.6 "p"`, "codex", "gpt-5.6", true},
 		{"double-dash equals", `loom.exe run --agent=codex --model=gpt-5.6 "p"`, "codex", "gpt-5.6", true},
@@ -117,13 +117,16 @@ func TestTokenizeCmdline(t *testing.T) {
 	}
 }
 
-func TestCLIWorkerEntries(t *testing.T) {
+// TestCLIWorkerEntriesUncorrelated proves the fallback path: with no correlation (nil
+// hook), a worker maps to a running cli-worker card carrying NO transcript and the honest
+// no-record note + kill consequence — byte-for-byte the pre-transcript behavior.
+func TestCLIWorkerEntriesUncorrelated(t *testing.T) {
 	start := time.Now().Add(-90 * time.Second)
 	ws := []cliWorker{
 		{PID: 18652, Backend: "claude", Model: "sonnet", Dir: `C:/x/aud/t2-frontend/claude`, StartedAt: start},
 		{PID: 4242, Backend: "local", Model: "", Dir: "", StartedAt: time.Time{}},
 	}
-	entries := cliWorkerEntries(ws)
+	entries := cliWorkerEntries(ws, nil)
 	if len(entries) != 2 {
 		t.Fatalf("want 2 entries, got %d", len(entries))
 	}
@@ -146,10 +149,10 @@ func TestCLIWorkerEntries(t *testing.T) {
 	if e0.AgeSeconds < 80 || e0.AgeSeconds > 100 {
 		t.Errorf("age = %d, want ~90s", e0.AgeSeconds)
 	}
-	if e0.Tail != "" {
-		t.Errorf("cli-worker must carry no transcript tail; got %q", e0.Tail)
+	if e0.Tail != "" || e0.RunID != "" {
+		t.Errorf("uncorrelated cli-worker must carry no tail/run_id; got tail=%q run_id=%q", e0.Tail, e0.RunID)
 	}
-	if !strings.Contains(e0.Note, "NO transcript") || !strings.Contains(e0.Note, "force-kill") {
+	if !strings.Contains(e0.Note, "no transcript") || !strings.Contains(e0.Note, "force-kill") {
 		t.Errorf("note must state no-transcript AND the kill consequence; got %q", e0.Note)
 	}
 	// A worker with no --dir falls back to a generic name and a zero age.
@@ -158,6 +161,57 @@ func TestCLIWorkerEntries(t *testing.T) {
 	}
 	if entries[1].AgeSeconds != 0 {
 		t.Errorf("unknown start time should give age 0; got %d", entries[1].AgeSeconds)
+	}
+}
+
+// TestCLIWorkerEntriesCorrelated proves the transcript path: when the correlate hook
+// returns a match, the card carries the run-id, the transcript tail (the app renders it
+// like a commission's string tail), the derived status as State, usage, and a note that
+// names the run + flags a wedged worker.
+func TestCLIWorkerEntriesCorrelated(t *testing.T) {
+	ws := []cliWorker{
+		{PID: 18652, Backend: "claude", Model: "sonnet", Dir: `C:/x/aud/t2-frontend/claude`},
+		{PID: 18777, Backend: "codex", Model: "gpt-5.6", Dir: `C:/x/aud/t1-backend/codex`},
+	}
+	correlate := func(w cliWorker) (runCorrelation, bool) {
+		switch w.PID {
+		case 18652:
+			return runCorrelation{RunID: "20260719-010000-abc", Status: "running",
+				Tail: "→ tool: Bash\nassistant: building the file"}, true
+		case 18777:
+			return runCorrelation{RunID: "20260719-011500-def", Status: "heartbeat-stale",
+				Tail: "· thinking: hmm", CostUSD: 0.42}, true
+		}
+		return runCorrelation{}, false
+	}
+	entries := cliWorkerEntries(ws, correlate)
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(entries))
+	}
+
+	live := entries[0]
+	if live.RunID != "20260719-010000-abc" {
+		t.Errorf("run_id = %q, want the correlated id", live.RunID)
+	}
+	if live.State != "running" {
+		t.Errorf("state = %q, want running", live.State)
+	}
+	if live.Tail != "→ tool: Bash\nassistant: building the file" {
+		t.Errorf("tail = %q, want the correlated transcript tail", live.Tail)
+	}
+	if !strings.Contains(live.Note, "20260719-010000-abc") || !strings.Contains(live.Note, "live") {
+		t.Errorf("live note should name the run and say live; got %q", live.Note)
+	}
+
+	stale := entries[1]
+	if stale.State != "heartbeat-stale" {
+		t.Errorf("state = %q, want heartbeat-stale", stale.State)
+	}
+	if stale.CostUSD != 0.42 {
+		t.Errorf("cost = %v, want 0.42 passed through", stale.CostUSD)
+	}
+	if !strings.Contains(stale.Note, "WEDGED") {
+		t.Errorf("stale-heartbeat note should flag a possibly wedged worker; got %q", stale.Note)
 	}
 }
 
