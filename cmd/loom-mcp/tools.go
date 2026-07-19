@@ -83,6 +83,88 @@ type closeResult struct {
 	Message   string `json:"message"`
 }
 
+// ---- serve-wide overview + generalized kill (the supervising surface) ----
+
+type SessionsOverviewInput struct{}
+
+// turnView is one recorded (prompt, reply) turn — the chat tail a supervising UI
+// can expand under a session card.
+type turnView struct {
+	At     string `json:"at,omitempty"`
+	Prompt string `json:"prompt,omitempty"`
+	Reply  string `json:"reply,omitempty"`
+}
+
+// overviewEntry is one live session anywhere on the box: a loom-mcp commission,
+// a serve ws resident, or a warm sticky seat. Kind tells them apart; Handle is
+// the kill target for any of them.
+type overviewEntry struct {
+	Kind        string     `json:"kind"` // "commission" | "resident" | "warm-seat"
+	Handle      string     `json:"handle"`
+	Name        string     `json:"name,omitempty"`
+	Purpose     string     `json:"purpose,omitempty"`
+	Backend     string     `json:"backend,omitempty"`
+	Model       string     `json:"model,omitempty"`
+	State       string     `json:"state"`
+	Writable    bool       `json:"writable,omitempty"`
+	HingeID     int64      `json:"hinge_id,omitempty"`
+	AgeSeconds  int        `json:"age_seconds,omitempty"`
+	IdleSeconds int        `json:"idle_seconds,omitempty"`
+	Tail        string     `json:"tail,omitempty"`  // most recent reply text (a glance)
+	Turns       []turnView `json:"turns,omitempty"` // recent chat tail (commissions)
+	Note        string     `json:"note,omitempty"`
+}
+
+type overviewResult struct {
+	Sessions   []overviewEntry `json:"sessions"`
+	Active     int             `json:"active"`
+	Max        int             `json:"max"`
+	ServeError string          `json:"serve_error,omitempty"` // non-empty if the serve query failed (commissions still listed)
+}
+
+// fromServeOverview maps a serve-reported session (resident or warm seat) into
+// the unified overview entry shape.
+func fromServeOverview(e loom.SessionOverview) overviewEntry {
+	return overviewEntry{
+		Kind:        e.Kind,
+		Handle:      e.Handle,
+		Name:        e.Name,
+		Backend:     e.Backend,
+		Model:       e.Model,
+		State:       e.State,
+		IdleSeconds: e.IdleSeconds,
+		Tail:        e.Tail,
+		Note:        serveKindNote(e.Kind),
+	}
+}
+
+// serveKindNote annotates the stop semantics for a serve-side session, so a
+// supervising UI can warn honestly before killing it.
+func serveKindNote(kind string) string {
+	switch kind {
+	case "warm-seat":
+		return "stop downgrades this warm seat to cold-resumable (lineage kept)"
+	case "resident":
+		return "stop closes this resident (process dropped, remembered lineage cleared)"
+	default:
+		return ""
+	}
+}
+
+type SessionKillInput struct {
+	Target string `json:"target" jsonschema:"the session to stop — a commission handle, a resident name/handle, or a warm-seat name/handle (from sessions_overview)"`
+	Reason string `json:"reason,omitempty" jsonschema:"optional reason recorded on a commission"`
+}
+
+type killResult struct {
+	OK        bool   `json:"ok"`
+	Kind      string `json:"kind,omitempty"` // what was stopped: commission | resident | warm-seat
+	Target    string `json:"target"`
+	Killed    bool   `json:"killed"`
+	PrevState string `json:"prev_state,omitempty"`
+	Message   string `json:"message"`
+}
+
 // registerTools wires the four tools onto a server, all bound to the shared manager.
 func registerTools(s *mcp.Server, m *manager) {
 	mcp.AddTool(s, &mcp.Tool{
@@ -136,6 +218,34 @@ func registerTools(s *mcp.Server, m *manager) {
 		}
 		return nil, res, nil
 	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "sessions_overview",
+		Description: "The WHOLE-BOX view: every live loom session on this serve — loom-mcp commissions, ws " +
+			"residents (named warm seats), AND the OpenAI-shim warm sticky seats (e.g. the voice companion) — " +
+			"each with its kind, model/backend, state, idle time, and a short recent chat tail to glance at. " +
+			"Use this to SEE what is running before deciding to stop any of it; each entry's `handle` is the " +
+			"target for session_kill. (Commissions show their full purpose + recent turns; warm seats carry no " +
+			"transcript — the shim keeps none.) If the serve is unreachable, commissions still list and " +
+			"`serve_error` is set.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ SessionsOverviewInput) (*mcp.CallToolResult, overviewResult, error) {
+		return nil, m.Overview(ctx), nil
+	})
+
+	mcp.AddTool(s, &mcp.Tool{
+		Name: "session_kill",
+		Description: "Stop ANY loom session on this serve by name or handle — the generalized e-stop. A commission " +
+			"is killed (seat dropped, pending tap withdrawn, scratch cleaned); a ws resident is closed (process " +
+			"dropped, remembered lineage cleared); a warm sticky seat is DOWNGRADED to cold-resumable (its live " +
+			"process torn down but its conversation lineage kept, so it can resume cold). Pass a `target` from " +
+			"sessions_overview. Reports what kind was stopped and the exact semantics applied.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in SessionKillInput) (*mcp.CallToolResult, killResult, error) {
+		res, err := m.Kill(ctx, in.Target, in.Reason)
+		if err != nil {
+			return toolError("session_kill: %v", err), killResult{}, nil
+		}
+		return nil, res, nil
+	})
 }
 
 // toolError builds a tool-execution error result (isError:true) — the model sees
@@ -161,4 +271,15 @@ type connectOpener struct {
 func (o connectOpener) open(ctx context.Context, backend string, opts loom.SessionOpts) (loom.Session, error) {
 	b := loom.ConnectBackend{URL: o.url, Token: o.token, Agent: backend}
 	return b.Open(ctx, opts)
+}
+
+// overview lists the serve's OTHER live sessions (residents + warm sticky
+// seats). Session-less: it needs only the token, not a backend.
+func (o connectOpener) overview(ctx context.Context) ([]loom.SessionOverview, error) {
+	return loom.ConnectBackend{URL: o.url, Token: o.token}.Overview(ctx)
+}
+
+// kill stops a serve session by name or handle (resident or warm seat).
+func (o connectOpener) kill(ctx context.Context, target string) (kind, note string, found bool, err error) {
+	return loom.ConnectBackend{URL: o.url, Token: o.token}.Kill(ctx, target)
 }

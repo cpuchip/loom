@@ -166,6 +166,52 @@ func (b ConnectBackend) Sessions(ctx context.Context) ([]SessionInfo, error) {
 	return f.Sessions, nil
 }
 
+// Overview lists every live session the server holds — ws residents (with a
+// recent-reply tail) AND the OpenAI shim's warm sticky seats — for a supervising
+// surface. Session-less (only the hello handshake), like Sessions.
+func (b ConnectBackend) Overview(ctx context.Context) ([]SessionOverview, error) {
+	ws, err := b.dialHello()
+	if err != nil {
+		return nil, err
+	}
+	defer ws.Close()
+	if err := ws.WriteJSON(frame{Op: opOverview}); err != nil {
+		return nil, fmt.Errorf("connect: overview: %w", err)
+	}
+	var f frame
+	if err := ws.ReadJSON(&f); err != nil {
+		return nil, fmt.Errorf("connect: overview: %w", err)
+	}
+	if f.Op == opError {
+		return nil, fmt.Errorf("connect: %s", f.Err)
+	}
+	return f.Overview, nil
+}
+
+// Kill stops a server session by name OR handle, covering both ws residents and
+// warm sticky seats. It returns the kind killed ("resident"|"warm-seat") and the
+// server's note describing the semantics applied. found=false means nothing on
+// the server matched the target (not an error — the caller may own it locally).
+// Session-less, like Sessions/Overview.
+func (b ConnectBackend) Kill(ctx context.Context, target string) (kind, note string, found bool, err error) {
+	ws, err := b.dialHello()
+	if err != nil {
+		return "", "", false, err
+	}
+	defer ws.Close()
+	if err := ws.WriteJSON(frame{Op: opKill, Target: target}); err != nil {
+		return "", "", false, fmt.Errorf("connect: kill: %w", err)
+	}
+	var f frame
+	if err := ws.ReadJSON(&f); err != nil {
+		return "", "", false, fmt.Errorf("connect: kill: %w", err)
+	}
+	if f.Op == opError {
+		return "", "", false, fmt.Errorf("connect: %s", f.Err)
+	}
+	return f.Kind, f.Note, f.OK, nil
+}
+
 // connectSession is a remote session reached over the socket. handle addresses it on
 // the server; realID is the backend's own session id learned from replies (what
 // SessionID reports, so a --resume hint uses the resumable id, not the handle). named

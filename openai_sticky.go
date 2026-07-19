@@ -286,6 +286,95 @@ func stickyTouch(e *stickyEntry) {
 	stickyMu.Unlock()
 }
 
+// stickyOverview reports the currently-WARM sticky seats for the serve-wide
+// overview (admin.go). Only warm seats are surfaced: a cold sticky mapping is a
+// paused conversation with no live process, nothing to show a stop button for
+// (the next turn cold-resumes it). A warm seat carries no retained transcript —
+// the shim flattens the caller's history per turn and keeps none — so Tail is
+// intentionally empty; State is always "warm" and IdleSeconds counts from the
+// last turn.
+func stickyOverview(now time.Time) []SessionOverview {
+	stickyMu.Lock()
+	type kv struct {
+		key string
+		e   *stickyEntry
+	}
+	ents := make([]kv, 0, len(stickyMap))
+	for k, e := range stickyMap {
+		ents = append(ents, kv{k, e})
+	}
+	stickyMu.Unlock()
+
+	out := make([]SessionOverview, 0, len(ents))
+	for _, it := range ents {
+		it.e.mu.Lock()
+		warm := it.e.warm != nil
+		last := it.e.lastTurn
+		it.e.mu.Unlock()
+		if !warm {
+			continue
+		}
+		idle := 0
+		if !last.IsZero() {
+			idle = int(now.Sub(last).Seconds())
+			if idle < 0 {
+				idle = 0
+			}
+		}
+		model, name := splitStickyKey(it.key)
+		out = append(out, SessionOverview{
+			Kind:        "warm-seat",
+			Name:        name,
+			Handle:      it.key,
+			Backend:     "claude", // the shim's warm seats are always the claude backend
+			Model:       model,
+			State:       "warm",
+			IdleSeconds: idle,
+		})
+	}
+	return out
+}
+
+// stickyKill downgrades a warm sticky seat matched by its sticky key, its
+// "sticky:<name>" user, or the bare <name>. A warm match is torn down to
+// cold-resumable (its lineage is preserved, so the next turn continues the
+// conversation); a matched-but-already-cold seat is a no-op that still reports
+// hit=true (the target existed). hit=false means no sticky seat matched.
+func stickyKill(target string) (note string, hit bool) {
+	stickyMu.Lock()
+	var match *stickyEntry
+	var matchKey string
+	for k, e := range stickyMap {
+		_, name := splitStickyKey(k)
+		if k == target || name == target || stickyPrefix+name == target {
+			match, matchKey = e, k
+			break
+		}
+	}
+	stickyMu.Unlock()
+	if match == nil {
+		return "", false
+	}
+	match.mu.Lock()
+	defer match.mu.Unlock()
+	if match.warm != nil {
+		match.clearWarm()
+		return "warm seat " + matchKey + " downgraded to cold-resumable (live process torn down, lineage kept)", true
+	}
+	return "seat " + matchKey + " was already cold — nothing warm to stop (its lineage is intact)", true
+}
+
+// splitStickyKey parses a sticky map key ("model|sticky:name") into the model
+// and the friendly conversation name. A malformed key degrades gracefully: the
+// whole key as the model, an empty name.
+func splitStickyKey(key string) (model, name string) {
+	model, user, found := strings.Cut(key, "|")
+	if !found {
+		return key, ""
+	}
+	return model, strings.TrimPrefix(user, stickyPrefix)
+}
+
 // flattenDelta renders only the messages AFTER the last assistant message —
 // the new user utterance plus any interleaved system/developer notes (e.g. a
 // voice front's reminder injections). ok=false when there is no assistant

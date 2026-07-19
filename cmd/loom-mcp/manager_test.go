@@ -50,6 +50,15 @@ type fakeOpener struct {
 	mu       sync.Mutex
 	opened   []*fakeSession
 	failNext bool
+
+	// serve-wide overview/kill fakes (the surface a real connectOpener reaches over
+	// the ws protocol). serveSessions is what overview returns; killed records the
+	// kill targets; serveErr, if set, makes overview fail (to prove graceful degrade).
+	serveSessions []loom.SessionOverview
+	serveErr      error
+	killed        []string
+	killFound     bool
+	killKind      string
 }
 
 func (o *fakeOpener) open(_ context.Context, _ string, _ loom.SessionOpts) (loom.Session, error) {
@@ -62,6 +71,25 @@ func (o *fakeOpener) open(_ context.Context, _ string, _ loom.SessionOpts) (loom
 	s := &fakeSession{}
 	o.opened = append(o.opened, s)
 	return s, nil
+}
+
+func (o *fakeOpener) overview(_ context.Context) ([]loom.SessionOverview, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.serveErr != nil {
+		return nil, o.serveErr
+	}
+	return o.serveSessions, nil
+}
+
+func (o *fakeOpener) kill(_ context.Context, target string) (string, string, bool, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.killed = append(o.killed, target)
+	if !o.killFound {
+		return "", "", false, nil
+	}
+	return o.killKind, "stopped " + target, true, nil
 }
 
 // fakeGate models the substrate tap gate. status starts "pending"; a test flips
@@ -335,5 +363,158 @@ func TestPurposeRequired(t *testing.T) {
 	m := newTestManager(&fakeOpener{}, newFakeGate())
 	if _, err := m.Open(context.Background(), openReq{purpose: "  ", writable: false}); err == nil {
 		t.Fatal("empty purpose should be refused")
+	}
+}
+
+// TestOverviewMergesAndDedups proves sessions_overview folds loom-mcp's own
+// commissions together with the serve's named residents + warm seats, and SKIPS
+// unnamed serve residents (those ARE the commissions, already shown richly).
+func TestOverviewMergesAndDedups(t *testing.T) {
+	op := &fakeOpener{serveSessions: []loom.SessionOverview{
+		{Kind: "resident", Name: "worker-1", Handle: "ws-aaa", Named: true, State: "idle", Tail: "done"},
+		{Kind: "warm-seat", Name: "companion", Handle: "sonnet#companion|sticky:companion", Model: "sonnet#companion", State: "warm"},
+		{Kind: "resident", Name: "", Handle: "ws-bbb", Named: false, State: "idle"}, // an unnamed resident == a commission
+	}}
+	m := newTestManager(op, newFakeGate())
+
+	res, err := m.Open(context.Background(), openReq{purpose: "advise on the covenant", writable: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ov := m.Overview(context.Background())
+	if ov.ServeError != "" {
+		t.Fatalf("serve was healthy; unexpected serve_error %q", ov.ServeError)
+	}
+	byKind := map[string]int{}
+	var sawUnnamedResident bool
+	for _, e := range ov.Sessions {
+		byKind[e.Kind]++
+		if e.Kind == "resident" && e.Handle == "ws-bbb" {
+			sawUnnamedResident = true
+		}
+	}
+	if byKind["commission"] != 1 {
+		t.Errorf("want 1 commission, got %d", byKind["commission"])
+	}
+	if byKind["resident"] != 1 {
+		t.Errorf("want 1 (named) resident, got %d", byKind["resident"])
+	}
+	if byKind["warm-seat"] != 1 {
+		t.Errorf("want 1 warm-seat, got %d", byKind["warm-seat"])
+	}
+	if sawUnnamedResident {
+		t.Error("an unnamed serve resident must be skipped (it is a commission, shown richly)")
+	}
+	// The commission we opened is present with its purpose.
+	var found bool
+	for _, e := range ov.Sessions {
+		if e.Kind == "commission" && e.Handle == res.Handle && e.Purpose == "advise on the covenant" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the opened commission is missing from the overview: %+v", ov.Sessions)
+	}
+}
+
+// TestOverviewDegradesWhenServeDown proves a serve failure still lists the
+// commissions and surfaces serve_error rather than failing the whole call.
+func TestOverviewDegradesWhenServeDown(t *testing.T) {
+	op := &fakeOpener{serveErr: errors.New("dial refused")}
+	m := newTestManager(op, newFakeGate())
+	if _, err := m.Open(context.Background(), openReq{purpose: "still here", writable: false}); err != nil {
+		t.Fatal(err)
+	}
+	ov := m.Overview(context.Background())
+	if ov.ServeError == "" {
+		t.Fatal("a serve failure should set serve_error")
+	}
+	if len(ov.Sessions) != 1 || ov.Sessions[0].Kind != "commission" {
+		t.Fatalf("commissions should still list when the serve is down; got %+v", ov.Sessions)
+	}
+}
+
+// TestOverviewTailFromTurns proves a commission's recent replies become its tail.
+func TestOverviewTailFromTurns(t *testing.T) {
+	m := newTestManager(&fakeOpener{}, newFakeGate())
+	res, _ := m.Open(context.Background(), openReq{purpose: "chat", writable: false})
+	if _, err := m.Send(context.Background(), res.Handle, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Send(context.Background(), res.Handle, "second"); err != nil {
+		t.Fatal(err)
+	}
+	ov := m.Overview(context.Background())
+	var e *overviewEntry
+	for i := range ov.Sessions {
+		if ov.Sessions[i].Handle == res.Handle {
+			e = &ov.Sessions[i]
+		}
+	}
+	if e == nil {
+		t.Fatal("commission missing from overview")
+	}
+	if e.Tail != "ack: second" {
+		t.Errorf("tail = %q, want the last reply 'ack: second'", e.Tail)
+	}
+	if len(e.Turns) != 2 {
+		t.Errorf("want 2 recorded turns, got %d", len(e.Turns))
+	}
+}
+
+// TestKillRoutesCommissionToClose proves a commission handle is stopped through
+// Close (the rich teardown), NOT the serve kill path.
+func TestKillRoutesCommissionToClose(t *testing.T) {
+	op := &fakeOpener{}
+	m := newTestManager(op, newFakeGate())
+	res, _ := m.Open(context.Background(), openReq{purpose: "advise", writable: false})
+	c := m.get(res.Handle)
+	_, _, sess, _ := c.snapshot()
+	fs := sess.(*fakeSession)
+
+	kr, err := m.Kill(context.Background(), res.Handle, "e-stop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kr.Kind != "commission" || !kr.Killed {
+		t.Fatalf("commission kill should report kind=commission, killed; got %+v", kr)
+	}
+	if !fs.isClosed() {
+		t.Fatal("commission kill must Close the seat")
+	}
+	if len(op.killed) != 0 {
+		t.Fatalf("a commission must NOT route to the serve kill path; serve kills=%v", op.killed)
+	}
+}
+
+// TestKillRoutesToServe proves a non-commission target is stopped via the serve,
+// reporting the kind the serve applied.
+func TestKillRoutesToServe(t *testing.T) {
+	op := &fakeOpener{killFound: true, killKind: "warm-seat"}
+	m := newTestManager(op, newFakeGate())
+	kr, err := m.Kill(context.Background(), "companion", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !kr.OK || kr.Kind != "warm-seat" {
+		t.Fatalf("serve kill should report ok + the serve's kind; got %+v", kr)
+	}
+	if len(op.killed) != 1 || op.killed[0] != "companion" {
+		t.Fatalf("kill should reach the serve with the target; got %v", op.killed)
+	}
+}
+
+// TestKillMissReportsNotFound proves a target that matches nothing anywhere is a
+// clean OK=false, not an error.
+func TestKillMissReportsNotFound(t *testing.T) {
+	op := &fakeOpener{killFound: false}
+	m := newTestManager(op, newFakeGate())
+	kr, err := m.Kill(context.Background(), "ghost", "")
+	if err != nil {
+		t.Fatalf("a kill miss should not error: %v", err)
+	}
+	if kr.OK {
+		t.Fatal("a miss should report OK=false")
 	}
 }

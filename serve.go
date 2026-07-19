@@ -66,6 +66,10 @@ const (
 	opClosed       = "closed"
 	opSessions     = "sessions"    // c→s: list residents
 	opSessionsOK   = "sessions_ok" // s→c: the resident list
+	opOverview     = "overview"    // c→s: serve-wide overview (residents + warm sticky seats, with a tail)
+	opOverviewOK   = "overview_ok" // s→c: the overview list
+	opKill         = "kill"        // c→s: kill a session by name-or-handle (resident OR warm sticky seat)
+	opKillOK       = "kill_ok"     // s→c: what was killed + the per-kind semantics applied
 	opError        = "error"
 )
 
@@ -117,6 +121,13 @@ type frame struct {
 
 	// sessions_ok (s→c)
 	Sessions []SessionInfo `json:"sessions,omitempty"`
+
+	// overview_ok (s→c): the serve-wide session overview (see admin.go)
+	Overview []SessionOverview `json:"overview,omitempty"`
+
+	// kill (c→s): the name OR handle to kill; kill_ok (s→c): which kind was killed
+	Target string `json:"target,omitempty"`
+	Kind   string `json:"kind,omitempty"`
 
 	// error / interrupt_ack (s→c)
 	Err string `json:"error,omitempty"`
@@ -375,6 +386,10 @@ func (s *server) handle(ws *wsConn) {
 			c.handleClose(f)
 		case opSessions:
 			c.handleSessions(f)
+		case opOverview:
+			c.handleOverview(f)
+		case opKill:
+			c.handleKill(f)
 		default:
 			_ = ws.WriteJSON(frame{Op: opError, Err: "unknown op: " + f.Op})
 		}

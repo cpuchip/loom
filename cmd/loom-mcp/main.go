@@ -20,7 +20,9 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"flag"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -42,7 +44,7 @@ func main() {
 	def := func(rel string) string { return filepath.Join(home, ".loom-mcp", rel) }
 	cwd, _ := os.Getwd()
 
-	listen := flag.String("listen", "127.0.0.1:7792", "bind address (loopback; a container reaches it via host.docker.internal)")
+	listen := flag.String("listen", "127.0.0.1:7792", "comma-separated bind address(es). Loopback by default (a container reaches it via host.docker.internal). To expose it to mesh peers, ADD your mesh IP — e.g. --listen 100.x.y.z:7792,127.0.0.1:7792 — so peers reach it while the loopback path (local container, emulator via 10.0.2.2) still works. This is a kill+transcript surface, so the bearer is REQUIRED on every bind (unlike the keyless chat shim); a mesh bind is wall #1 for network peers, the bearer is wall #2. Never bind 0.0.0.0.")
 	loomURL := flag.String("loom-url", "ws://127.0.0.1:7791", "the loom serve to commission sessions on")
 	loomTokenFile := flag.String("loom-token-file", def("loom-serve-tokens"), "token file for the loom serve (first token used)")
 	tokenFile := flag.String("token-file", def("token"), "bearer token gating THIS MCP server (minted if absent)")
@@ -84,15 +86,32 @@ func main() {
 	mgr := newManager(op, gt, pl, *maxSessions, *sendTimeout, logger.Printf)
 	defer mgr.shutdown()
 
-	if err := runHTTP(ctx, mgr, *listen, bearer, logger); err != nil {
+	if err := runHTTP(ctx, mgr, splitAddrs(*listen), bearer, logger); err != nil {
 		logger.Fatalf("serve: %v", err)
 	}
 }
 
+// splitAddrs parses a comma-separated bind list, trimming spaces and dropping
+// blanks (so a trailing comma or a spaced list is tolerated).
+func splitAddrs(s string) []string {
+	var out []string
+	for _, a := range strings.Split(s, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // runHTTP serves the MCP tools over the go-sdk StreamableHTTPHandler behind a
-// bearer check. Each MCP session gets a fresh *mcp.Server, but the tools close
-// over the ONE shared manager so the commission registry is process-wide.
-func runHTTP(ctx context.Context, mgr *manager, addr, bearer string, logger *log.Logger) error {
+// bearer check, on EVERY bind address (mesh IP + loopback). Each MCP session
+// gets a fresh *mcp.Server, but the tools close over the ONE shared manager so
+// the commission registry is process-wide. Binding is resilient: a single
+// address that fails to bind (e.g. the mesh interface momentarily down) is
+// logged and skipped so the others still serve; only an all-failed bind is
+// fatal. The bearer is required on every bind — the mesh is wall #1 for network
+// peers, the token is wall #2 everywhere.
+func runHTTP(ctx context.Context, mgr *manager, addrs []string, bearer string, logger *log.Logger) error {
 	getServer := func(*http.Request) *mcp.Server {
 		s := mcp.NewServer(&mcp.Implementation{Name: "loom-mcp", Version: version}, nil)
 		registerTools(s, mgr)
@@ -107,19 +126,45 @@ func runHTTP(ctx context.Context, mgr *manager, addr, bearer string, logger *log
 	})
 	mux.Handle("/mcp", bearerAuth(bearer, handler))
 
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+
+	var lns []net.Listener
+	for _, a := range addrs {
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			logger.Printf("WARNING: could not bind %s: %v (continuing on the other address(es))", a, err)
+			continue
+		}
+		lns = append(lns, ln)
+	}
+	if len(lns) == 0 {
+		return fmt.Errorf("no listen address could be bound: %v", addrs)
+	}
+
 	go func() {
 		<-ctx.Done()
 		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
 		_ = srv.Shutdown(sctx)
 	}()
-	logger.Printf("loom-mcp %s on http://%s/mcp (commissioning %s, gate via pg, auth=%v)", version, addr, "loom serve", bearer != "")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+
+	errc := make(chan error, len(lns))
+	for _, ln := range lns {
+		logger.Printf("loom-mcp %s on http://%s/mcp (commissioning loom serve, gate via pg, auth=%v)", version, ln.Addr(), bearer != "")
+		go func(ln net.Listener) {
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				errc <- err
+			}
+		}(ln)
+	}
+
+	select {
+	case <-ctx.Done():
+		logger.Printf("loom-mcp stopped cleanly")
+		return nil
+	case err := <-errc:
 		return err
 	}
-	logger.Printf("loom-mcp stopped cleanly")
-	return nil
 }
 
 // bearerAuth gates the handler on a constant-time bearer check. On success it

@@ -36,9 +36,21 @@ const (
 
 // opener talks to a loom serve. Real impl wraps loom.ConnectBackend; a test
 // injects a fake so the state machine + cap + gate logic run with no serve.
+//
+// overview + kill are the serve-wide surface (not per-session): overview lists
+// the serve's OTHER sessions (named residents + warm sticky seats) so loom-mcp
+// can merge them with its own commissions; kill stops one of THOSE by name or
+// handle. Both degrade gracefully — a serve that is down or predates these ops
+// yields an error the manager reports without failing the whole overview.
 type opener interface {
 	open(ctx context.Context, backend string, opts loom.SessionOpts) (loom.Session, error)
+	overview(ctx context.Context) ([]loom.SessionOverview, error)
+	kill(ctx context.Context, target string) (kind, note string, found bool, err error)
 }
+
+// commissionTailTurns is how many recent (prompt, reply) turns a commission
+// keeps for the overview's glance-able tail. Small — this is a peek, not a log.
+const commissionTailTurns = 3
 
 // gate is the substrate tool-confirm tap gate. enqueue creates the card row and
 // returns its hinge id; status reports the row's lifecycle; withdraw declines a
@@ -80,6 +92,39 @@ type commission struct {
 	sess       loom.Session
 	note       string
 	cancelPoll context.CancelFunc
+	turns      []turnLine // last few (prompt, reply) turns — the overview's tail
+	running    bool       // a send is in flight
+	lastActive time.Time  // last turn boundary (send start/finish)
+}
+
+// turnLine is one recorded turn on a commission — the write-side transcript the
+// overview surfaces, since loom-mcp is the only thing that drives a commission
+// (the serve keeps no per-commission transcript loom-mcp can read).
+type turnLine struct {
+	At     time.Time
+	Prompt string
+	Reply  string
+}
+
+// recordTurn appends a completed turn to the commission's short tail ring and
+// marks it idle. Prompt/reply are clipped so the tail stays glance-able.
+func (c *commission) recordTurn(prompt, reply string) {
+	c.mu.Lock()
+	c.turns = append(c.turns, turnLine{At: time.Now(), Prompt: clip(prompt, 400), Reply: clip(reply, 600)})
+	if len(c.turns) > commissionTailTurns {
+		c.turns = c.turns[len(c.turns)-commissionTailTurns:]
+	}
+	c.running = false
+	c.lastActive = time.Now()
+	c.mu.Unlock()
+}
+
+// markRunning flags a send as in flight (reflected in the overview state).
+func (c *commission) markRunning() {
+	c.mu.Lock()
+	c.running = true
+	c.lastActive = time.Now()
+	c.mu.Unlock()
 }
 
 func (c *commission) snapshot() (sessState, int64, loom.Session, string) {
@@ -314,6 +359,7 @@ func (m *manager) Send(ctx context.Context, handle, message string) (sendResult,
 	// (A detach/await variant — connectSession already implements it — is P2.)
 	sctx, cancel := context.WithTimeout(ctx, m.sendTimeout)
 	defer cancel()
+	c.markRunning()
 	type res struct {
 		r   loom.Reply
 		err error
@@ -321,6 +367,9 @@ func (m *manager) Send(ctx context.Context, handle, message string) (sendResult,
 	ch := make(chan res, 1)
 	go func() {
 		r, err := sess.Send(sctx, message)
+		// Record the turn for the overview tail even if the select already timed out
+		// (a slow turn that finishes later still updates the tail + clears running).
+		c.recordTurn(message, r.Text)
 		ch <- res{r, err}
 	}()
 	select {
@@ -353,6 +402,122 @@ func (m *manager) List() listResult {
 	m.mu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].Handle < out[j].Handle })
 	return listResult{Sessions: out, Active: active, Max: m.maxSess}
+}
+
+// overview snapshots one commission for the serve-wide overview: its rich
+// identity (purpose, writable, gate), current state, and the last reply as a
+// tail plus the recent turns.
+func (c *commission) overview() overviewEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	tail := ""
+	if n := len(c.turns); n > 0 {
+		tail = c.turns[n-1].Reply
+	}
+	turns := make([]turnView, 0, len(c.turns))
+	for _, t := range c.turns {
+		turns = append(turns, turnView{At: t.At.UTC().Format(time.RFC3339), Prompt: t.Prompt, Reply: t.Reply})
+	}
+	state := string(c.state)
+	if c.state == stateOpen && c.running {
+		state = "running"
+	}
+	return overviewEntry{
+		Kind:        "commission",
+		Handle:      c.handle,
+		Name:        c.req.purpose,
+		Purpose:     c.req.purpose,
+		Backend:     c.req.backend,
+		Model:       c.req.model,
+		State:       state,
+		Writable:    c.req.writable,
+		HingeID:     c.hingeID,
+		Tail:        tail,
+		Turns:       turns,
+		AgeSeconds:  int(time.Since(c.createdAt).Seconds()),
+		IdleSeconds: idleSince(c.lastActive),
+		Note:        c.note,
+	}
+}
+
+// Overview merges loom-mcp's own commissions (rich) with the serve's OTHER live
+// sessions (named residents + warm sticky seats), so a supervising surface sees
+// EVERYTHING on the box with a stop button for each. Unnamed serve residents are
+// deliberately skipped: an unnamed ws resident IS a loom-mcp commission (opened
+// ephemerally; it lives and dies with loom-mcp's held socket), already shown
+// richly here — listing it again from the serve would double it with a poorer
+// view. A serve that is down or predates the overview op still yields the
+// commissions, plus a serve_error the caller can surface.
+func (m *manager) Overview(ctx context.Context) overviewResult {
+	m.mu.Lock()
+	entries := make([]overviewEntry, 0, len(m.sessions))
+	for _, c := range m.sessions {
+		entries = append(entries, c.overview())
+	}
+	active := m.activeCountLocked()
+	m.mu.Unlock()
+
+	var serveErr string
+	if serve, err := m.op.overview(ctx); err != nil {
+		serveErr = err.Error()
+		m.log("overview: serve query failed: %v", err)
+	} else {
+		for _, e := range serve {
+			if e.Kind == "resident" && !e.Named {
+				continue // an unnamed resident is one of our commissions, shown richly above
+			}
+			entries = append(entries, fromServeOverview(e))
+		}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Kind != entries[j].Kind {
+			return entries[i].Kind < entries[j].Kind
+		}
+		return entries[i].Handle < entries[j].Handle
+	})
+	return overviewResult{Sessions: entries, Active: active, Max: m.maxSess, ServeError: serveErr}
+}
+
+// Kill is the generalized e-stop by name OR handle. A handle loom-mcp owns (a
+// commission) routes to Close — the richest teardown (kills the seat, withdraws
+// a pending tap, cleans the scratch dirs). Anything else is a serve session — a
+// named resident (hard closed) or a warm sticky seat (downgraded to
+// cold-resumable) — killed through the serve, which reports the per-kind
+// semantics it applied.
+func (m *manager) Kill(ctx context.Context, target, reason string) (killResult, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return killResult{}, fmt.Errorf("target is required — the handle or name to stop")
+	}
+	if c := m.get(target); c != nil {
+		cr, err := m.Close(ctx, target, reason)
+		if err != nil {
+			return killResult{}, err
+		}
+		return killResult{OK: cr.OK, Kind: "commission", Target: target, Killed: cr.Killed,
+			PrevState: cr.PrevState, Message: cr.Message}, nil
+	}
+	kind, note, found, err := m.op.kill(ctx, target)
+	if err != nil {
+		return killResult{}, err
+	}
+	if !found {
+		return killResult{OK: false, Target: target,
+			Message: "No commissioned session, resident, or warm seat matched \"" + target + "\"."}, nil
+	}
+	return killResult{OK: true, Kind: kind, Target: target, Killed: true, Message: note}, nil
+}
+
+// idleSince returns whole seconds since t, or 0 if t is unset.
+func idleSince(t time.Time) int {
+	if t.IsZero() {
+		return 0
+	}
+	if d := int(time.Since(t).Seconds()); d > 0 {
+		return d
+	}
+	return 0
 }
 
 // Close is the e-stop: it kills the live seat (the ephemeral session's process is
