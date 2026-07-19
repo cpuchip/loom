@@ -63,20 +63,32 @@ llama-chip solved this exact topology for models, and every piece transfers:
    (see-and-signal, never open/send); (c) full peer. Recommendation: (b) at most,
    designed explicitly; default (a) until ruled. This one is not mine to lean on
    further — it touches employer trust.
-2. **Spend authority across nodes.** A commission opened on NOCIX by an agent on
+2. **Spend authority — RULED 2026-07-18:** cap lives on the node that runs the
+   session; opener identity travels. PLUS Michael's auth model: if the remote box
+   has its OWN claude auth, sessions there use ITS account (buckets remain
+   theirs); if the remote is unauthed, the ORIGINATING box's creds travel with
+   the commission (session-home auth follows the session). Both modes supported.
+   *(original)* **Spend authority across nodes.** A commission opened on NOCIX by an agent on
    fermion spends whose budget, under whose cap? Recommendation: the CAP lives on
    the node that runs the session (each serve enforces its own commission cap +
    spend posture), and cross-node opens carry the originating agent's identity in
    the session record.
-3. **Tap gates across nodes.** Writable commissions on ANY node should still land
+3. **Tap gates — RULED 2026-07-18:** the app's LOOM TAB carries the bells/cards
+   for commissioning gates (all nodes card to the one phone).
+   *(original)* **Tap gates across nodes.** Writable commissions on ANY node should still land
    on Michael's ONE phone as a card. The tool_confirm rows live in the fermion
    substrate — remote nodes need a path to enqueue there (the roster hub could
    relay, or remote serves call fermion's gate endpoint). Design choice.
-4. **NOCIX exposure.** NOCIX is not a mesh peer today (public box, token-gated
+4. **NOCIX — RULED 2026-07-18:** MESH-ENROLL. No loom on a public IP; NOCIX
+   joins NetBird. (Note for later alignment: llama-chip's NOCIX node currently
+   uses the public+bearer pattern because NOCIX wasn't a mesh peer — once
+   enrolled, that exposure can be closed to mesh-only too.)
+   *(original)* **NOCIX exposure.** NOCIX is not a mesh peer today (public box, token-gated
    services). A loom peer there means either NetBird enrollment for NOCIX or a
    public wss endpoint with cert-pinning as the only wall. With mTLS, (b) is
    defensible; (a) is cleaner. His infrastructure call.
-5. **Blast-radius defaults.** Which nodes accept REMOTE commissions at all
+5. **Blast radius — RULED 2026-07-18:** remote-commissioning OFF by default,
+   per-node explicit enable. *(original)* **Blast-radius defaults.** Which nodes accept REMOTE commissions at all
    (vs. visibility-only)? Recommendation: every serve ships remote-commissioning
    OFF by default; enabling it is a per-node, explicit act.
 
