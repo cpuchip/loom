@@ -60,6 +60,8 @@ func main() {
 		err = cmdAwait(os.Args[2:])
 	case "sessions":
 		err = cmdSessions(os.Args[2:])
+	case "runs":
+		err = cmdRuns(os.Args[2:])
 	case "serve":
 		err = cmdServe(os.Args[2:])
 	case "pair":
@@ -251,26 +253,64 @@ func cmdRun(args []string) error {
 	if err := sf.resolveClone(os.Stderr); err != nil {
 		return err
 	}
+	// Lifecycle durability (the 2026-07-18 incident fix): every run gets a streamed log,
+	// a crash-legible manifest, and a completion sentinel under LOOM_HOME/runs/<id>/. A
+	// recorder failure is non-fatal — the worker still runs, just without durability.
+	rec, recErr := newRunRecorder(os.Args, runCwd(*sf.dir), *sf.agent, *sf.model)
+	if recErr != nil {
+		fmt.Fprintf(os.Stderr, "[loom run: lifecycle recorder unavailable: %v]\n", recErr)
+	} else {
+		fmt.Fprintln(os.Stderr, rec.startedLine())
+	}
 	b, err := chooseBackend(sf)
 	if err != nil {
 		return err
+	}
+	// Record child PIDs as the backend spawns them, so a supervisor can confirm a killed
+	// wrapper took its child with it. Cleared on return (a `loom run` drives one run).
+	if rec != nil {
+		loom.SetChildSpawnHook(rec.addChildPID)
+		defer loom.SetChildSpawnHook(nil)
 	}
 	sess, err := b.Open(context.Background(), sf.opts())
 	if err != nil {
 		return err
 	}
 	defer sess.Close()
-	r, err := sendTurn(sess, prompt, *sf.events)
-	if err != nil {
+	var reply loom.Reply
+	var runErr error
+	if rec != nil {
+		// Runs from a defer → covers graceful returns AND panics. A hard TerminateProcess
+		// skips it on purpose: the un-finished manifest + stale heartbeat is the evidence.
+		defer func() { rec.finish(runErr, reply) }()
+	}
+	var recEvent func(loom.Event)
+	if rec != nil {
+		recEvent = rec.logEvent
+	}
+	reply, runErr = sendTurnTee(sess, prompt, *sf.events, recEvent)
+	if runErr != nil {
+		return runErr
+	}
+	if err := emitReply(reply, *sf.json); err != nil {
 		return err
 	}
-	if err := emitReply(r, *sf.json); err != nil {
-		return err
-	}
-	if !*sf.json && r.SessionID != "" {
-		fmt.Fprintf(os.Stderr, "[session %s — resume: loom run --resume %s ...]\n", r.SessionID, r.SessionID)
+	if !*sf.json && reply.SessionID != "" {
+		fmt.Fprintf(os.Stderr, "[session %s — resume: loom run --resume %s ...]\n", reply.SessionID, reply.SessionID)
 	}
 	return nil
+}
+
+// runCwd resolves the recorded working directory: the explicit --dir, else the wrapper's
+// own cwd (what the agent actually inherits).
+func runCwd(dir string) string {
+	if dir != "" {
+		return dir
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return ""
 }
 
 // chat: persistent multi-turn session — one message per stdin line.
@@ -1104,6 +1144,14 @@ func reviewPrompt(label, content string) string {
 // sendTurn runs one turn, optionally streaming the agent's tool calls + thinking
 // to stderr (the work) while the final answer is returned in the Reply.
 func sendTurn(sess loom.Session, prompt string, showEvents bool) (loom.Reply, error) {
+	return sendTurnTee(sess, prompt, showEvents, nil)
+}
+
+// sendTurnTee is sendTurn plus an optional extra event sink (the run recorder's log). It
+// preserves the exact old fast path — sess.Send with no streaming — only when there is
+// neither a stderr printer nor an extra sink; otherwise it streams so every event reaches
+// the durable log even when --events is off.
+func sendTurnTee(sess loom.Session, prompt string, showEvents bool, extra func(loom.Event)) (loom.Reply, error) {
 	// While this turn runs, the first Ctrl-C interrupts the AGENT's work (not loom) —
 	// the session stays alive, so you can steer with your next message. Default
 	// Ctrl-C (exit loom) is restored the moment the turn returns.
@@ -1121,10 +1169,22 @@ func sendTurn(sess loom.Session, prompt string, showEvents bool) (loom.Reply, er
 		}()
 		defer func() { signal.Stop(sigCh); close(done) }()
 	}
-	if showEvents {
-		return sess.SendStream(context.Background(), prompt, eventPrinter())
+	if !showEvents && extra == nil {
+		return sess.Send(context.Background(), prompt)
 	}
-	return sess.Send(context.Background(), prompt)
+	var printer func(loom.Event)
+	if showEvents {
+		printer = eventPrinter()
+	}
+	cb := func(ev loom.Event) {
+		if extra != nil {
+			extra(ev)
+		}
+		if printer != nil {
+			printer(ev)
+		}
+	}
+	return sess.SendStream(context.Background(), prompt, cb)
 }
 
 func eventPrinter() func(loom.Event) {
@@ -1173,6 +1233,8 @@ usage:
   loom send    --connect ws://host:port --token T --session NAME [--detach] "msg"   reattach-or-open, send
   loom await   --connect ws://host:port --token T --session NAME --turn ID [--last-reply] [--timeout S]  fetch a detached reply
   loom sessions --connect ws://host:port --token T             list resident sessions
+  loom runs                                                    list recent loom-run lifecycle records (running/heartbeat-stale/done/failed)
+  loom runs tail <run-id>                                      print a run's streamed output.log (survives a dead wrapper)
 
   --connect ws://host:port --token T   (on run/chat/send) drive a remote loom serve over websocket —
                                        the --agent/--model/--dir/--resume/opts are opened THERE

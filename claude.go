@@ -65,7 +65,9 @@ func (s *claudeSession) ensureStarted(ctx context.Context) error {
 		return err
 	}
 	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
+	// StartChild (not a bare cmd.Start) so a dying loom wrapper reaps this child instead
+	// of orphaning it — the 2026-07-18 incident. See reap.go.
+	if err := StartChild(cmd); err != nil {
 		return err
 	}
 	sc := bufio.NewScanner(stdout)

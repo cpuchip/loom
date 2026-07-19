@@ -101,7 +101,8 @@ func (s *copilotSession) SendStream(ctx context.Context, prompt string, onEvent 
 		return Reply{Backend: "copilot", Err: err.Error()}, err
 	}
 	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
+	// StartChild (not a bare cmd.Start) so a dying loom wrapper reaps this child — see reap.go.
+	if err := StartChild(cmd); err != nil {
 		return Reply{Backend: "copilot", Err: err.Error()}, err
 	}
 	s.mu.Lock()
