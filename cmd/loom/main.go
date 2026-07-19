@@ -64,6 +64,8 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "pair":
 		err = cmdPair(os.Args[2:])
+	case "enroll":
+		err = cmdEnroll(os.Args[2:])
 	case "agents":
 		for name := range loom.Backends() {
 			fmt.Println(name)
@@ -797,6 +799,7 @@ func cmdServe(args []string) error {
 	tokenFile := fs.String("token-file", "", "newline-delimited token file that gates clients (required unless --tls)")
 	addToken := fs.Bool("add-token", false, "mint a token, append it to --token-file, print it, and exit")
 	tlsFlag := fs.Bool("tls", false, "serve over pinned mTLS — peers enrolled with `loom pair` connect over wss://; --token-file becomes optional (the pin is the wall)")
+	tlsListen := fs.String("tls-listen", "", "COEXISTENCE: also serve pinned mTLS on this second addr while --listen stays plain — clients migrate one at a time (a token file is required and gates BOTH listeners; the tls one adds the pin on top)")
 	idleTTL := fs.Duration("idle-ttl", 4*time.Hour, "downgrade a named resident idle longer than this to cold-resumable (closed, lineage remembered); 0 = never")
 	openaiHome := fs.String("openai-claude-home", "", "default ~/.claude the OpenAI-shim's isolated sessions mount (skills/settings/MCP); empty = loom default. The /v1/chat/completions endpoint shares the --listen port.")
 	openaiHomeRoot := fs.String("openai-home-root", "", "dir holding role-specific claude-homes (<root>/<role>-claude-home); a model named \"<model>#<role>\" (e.g. sonnet#critic) mounts that role's home. Lets one serve host purpose-built environments (critic, review, ...).")
@@ -820,6 +823,20 @@ func cmdServe(args []string) error {
 		fmt.Println(tok)
 		fmt.Fprintf(os.Stderr, "[token appended to %s — a client drives this box with:\n  loom run --connect ws://<this-box>:<port> --token %s ...]\n", *tokenFile, tok)
 		return nil
+	}
+	if *tlsFlag && *tlsListen != "" {
+		return fmt.Errorf("serve: use either --tls (pure pinned mTLS on --listen) or --tls-listen (coexistence: plain + mTLS), not both")
+	}
+	if *tlsListen != "" {
+		id, err := loom.LoadOrCreateIdentity("")
+		if err != nil {
+			return err
+		}
+		pins, err := loom.LoadPinStore("")
+		if err != nil {
+			return err
+		}
+		return loom.ServeBoth(*listen, *tlsListen, *tokenFile, loom.Backends(), *idleTTL, id, pins)
 	}
 	if *tlsFlag {
 		id, err := loom.LoadOrCreateIdentity("")
@@ -926,6 +943,82 @@ func promptLine(stdin *bufio.Reader, prompt string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
+}
+
+// enroll: code-driven enrollment — the phone / agent / unattended alternative to
+// `loom pair` (which needs two humans comparing a PIN on two screens). The box operator
+// mints a code on the SERVER side and reads/speaks it; the CLIENT side submits it. One
+// code, single use, short-lived.
+//
+//	on the box (server side), open a one-shot enrollment window:
+//	  loom enroll --serve --listen 100.x.y.z:7779 --name phone
+//	it prints a code, e.g. K7Q2-M9XA — read/speak it to whoever is enrolling.
+//
+//	on the enrolling machine/agent (client side):
+//	  loom enroll --connect 100.x.y.z:7779 --code K7Q2-M9XA --name mybox
+//	then drive it: loom run --connect wss://100.x.y.z:7777 --peer mybox ...
+//
+// The Android app does the CLIENT side of this exact exchange over HTTP — see
+// docs/enrollment.md for the wire protocol.
+func cmdEnroll(args []string) error {
+	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
+	serve := fs.Bool("serve", false, "server side: open a one-shot enrollment window and print a code")
+	connect := fs.String("connect", "", "client side: dial a box's `loom enroll --serve` (host:port)")
+	listen := fs.String("listen", "", "(--serve) bind the enrollment window here (e.g. 100.x.y.z:7779)")
+	code := fs.String("code", "", "(--connect) the code the box operator read out")
+	name := fs.String("name", "", "(--serve) name to pin the enrolling client under; (--connect) name to pin the server under (the --peer name you will dial)")
+	label := fs.String("label", "", "(--connect) optional self-label the server may use as its pin name for you")
+	timeout := fs.Duration("timeout", 5*time.Minute, "(--serve) how long the enrollment window stays open")
+	_ = fs.Parse(args)
+
+	if *serve == (*connect != "") {
+		return fmt.Errorf("enroll: exactly one of --serve or --connect is required")
+	}
+
+	id, err := loom.LoadOrCreateIdentity("")
+	if err != nil {
+		return err
+	}
+	pins, err := loom.LoadPinStore("")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "this node: %s\n", id.Fingerprint())
+
+	if *serve {
+		if *listen == "" {
+			return fmt.Errorf("enroll --serve: --listen host:port is required")
+		}
+		c, err := loom.NewEnrollCode()
+		if err != nil {
+			return err
+		}
+		es := &loom.EnrollServer{Identity: id, Pins: pins, Code: c, PinName: *name}
+		fmt.Fprintf(os.Stderr, "\n  Enrollment code (read it to the device being enrolled):\n\n      %s\n\n", loom.GroupEnrollCode(c))
+		fmt.Fprintf(os.Stderr, "waiting for one enrollment on %s …\n", *listen)
+		pinnedName, fp, err := es.ListenAndEnroll(*listen, *timeout)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("enrolled %q = %s\n", pinnedName, fp)
+		fmt.Fprintln(os.Stderr, "trusted. that client can now drive this box over mTLS (wss://).")
+		return nil
+	}
+
+	// client side
+	if *code == "" {
+		return fmt.Errorf("enroll --connect: --code is required (ask the box operator for it)")
+	}
+	if *name == "" {
+		return fmt.Errorf("enroll --connect: --name is required (the peer name you will dial with --peer)")
+	}
+	res, err := loom.EnrollConnect(*connect, *code, *name, *label, id, pins)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("pinned %q = %s\n", res.ServerName, res.ServerFingerprint)
+	fmt.Fprintf(os.Stderr, "trusted. drive it with:\n  loom run --connect wss://%s --peer %s ...\n", *connect, res.ServerName)
+	return nil
 }
 
 func backendsFromList(list string) ([]loom.Backend, error) {
@@ -1067,9 +1160,12 @@ usage:
   loom review --agents claude,local [--dir R] [--diff HEAD] [files...]   review a diff or files
   loom duo    --agent claude --critic-agent codex [--dir D] [--rounds 6] "task"   worker builds, critic judges each build point
   loom serve --listen 127.0.0.1:7777 --token-file ~/.loom/tokens [--add-token] [--idle-ttl 4h]   run loom as a ws service
-  loom serve --listen 100.x.y.z:7777 --tls                     run loom over pinned mTLS (peers enrolled via loom pair)
-  loom pair  --listen 100.x.y.z:7778                           wait for a pairing (one box)
+  loom serve --listen 100.x.y.z:7777 --tls                     run loom over pinned mTLS (peers enrolled via loom pair/enroll)
+  loom serve --listen 100.x.y.z:7777 --tls-listen 100.x.y.z:7778 --token-file T   COEXISTENCE: plain + mTLS at once (migrate clients one at a time)
+  loom pair  --listen 100.x.y.z:7778                           wait for a pairing (one box, two humans compare a PIN)
   loom pair  --connect 100.x.y.z:7778 --name box-b             pair with the waiting box, confirm the PIN, pin its cert
+  loom enroll --serve --listen 100.x.y.z:7779 --name phone     one-shot code enrollment window (for a phone/agent that can't do the PIN compare)
+  loom enroll --connect 100.x.y.z:7779 --code K7Q2-M9XA --name mybox   submit the code, pin the box's cert
   loom agents                                                  list backends
 
   warm-resident (over --connect): keep a claude process resident + warm and reattach by NAME —

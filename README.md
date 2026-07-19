@@ -327,6 +327,19 @@ shared secret (ZRTP's shape): a man-in-the-middle who substitutes keys makes the
 the human's tap catches it. Zero external dependencies — Go stdlib crypto only. Plain `ws://` + `--token`
 is unchanged; `wss://` requires `--peer <name>` (dial a *known* pin, never trust-on-first-use).
 
+For clients that can't do the two-screen PIN compare (a phone app, an unattended machine, an agent),
+`loom enroll` is the one-code alternative: the box shows a short code, the client submits it, and both
+sides end up mutually pinned just like pairing. And `loom serve --tls-listen <addr>` runs plain **and**
+mTLS at once so live clients migrate one at a time. See [docs/enrollment.md](docs/enrollment.md) for the
+enroll wire protocol (what the brain-app implements) and the plain→mTLS migration map.
+
+```sh
+# on the box: open a one-shot enrollment window, read the printed code to the device
+loom enroll --serve --listen 100.x.y.z:7779 --name phone
+# on the enrolling machine/agent: submit the code, pin the box
+loom enroll --connect 100.x.y.z:7779 --code GV56-OSAX --name mybox
+```
+
 ### Test
 
 ```sh
