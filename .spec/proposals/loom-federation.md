@@ -45,7 +45,14 @@ llama-chip solved this exact topology for models, and every piece transfers:
 
 ## The council questions (Michael's to rule, before any build)
 
-1. **★ THE WORKCHIP BOUNDARY (load-bearing).** The standing ruling is emphatic:
+1. **★ THE WORKCHIP BOUNDARY — RULED 2026-07-18 (Michael):** "fermion to/from
+   workchip should purely be coordination over OSS repos that both use." So:
+   workchip is **EXCLUDED from the loom mesh entirely** — no roster presence, no
+   session visibility, no commissioning, either direction. The personal↔work
+   channel is asynchronous OSS-repo collaboration (PRs/issues/A2A over shared
+   public repos; lodestar named as a future candidate). This SUPERSEDES the
+   proposal's option analysis below, kept for the record.
+   *(original question:)* **THE WORKCHIP BOUNDARY (load-bearing).** The standing ruling is emphatic:
    work content OFF this box; NO personal↔work substrate federation EVER; the
    MAXIMUM channel is "loom bridge — coordination only." A loom mesh that includes
    workchip must therefore be scoped hard: visibility/coordination of workchip
