@@ -156,6 +156,41 @@ status, text, cost_usd}`. Both session ids surface so either seat can be resumed
 (`loom run --resume <id>`, `--consult` for the critic). `--events` streams both seats' tool calls to
 stderr, tagged `[worker]`/`[critic]`.
 
+## Flow — a step DAG with cached resume (`loom flow`)
+
+`loom flow` runs a JSON-declared DAG of steps — each one loom session with its own working dir, prompt,
+dependency edges, and a deterministic **oracle** (shell cmd in the step's dir; exit 0 = green) — with
+bounded parallelism and a journal under `$LOOM_HOME/flows/<flow-id>/`. The killer feature is
+**resume-from-journal**: `loom flow resume <flow-id>` SKIPS every step whose latest record is green
+(green = cached, served instantly) and re-runs only the red ones, with cached greens satisfying their
+dependents. A foreman crash costs nothing but the re-issue of the command. Design doc:
+`docs/proposals/loom-flow.md`.
+
+```sh
+loom flow run --skip-permissions my-flow.json     # run the DAG (flags BEFORE the file)
+loom flow resume --skip-permissions my-flow       # skip greens, re-run reds
+```
+
+```json
+{"flow":"svc-refactor","concurrency":3,"steps":[
+  {"id":"brief","prompt":"Write refactor-brief.md …","oracle":"test -s refactor-brief.md"},
+  {"id":"build","agent":"codex","dir":"svc","prompt_file":"prompts/build.md","needs":["brief"],
+   "oracle":"go build ./... && go test ./..."},
+  {"id":"review","needs":["build"],"prompt":"Review; write REVIEW.md","oracle":"test -s REVIEW.md"}]}
+```
+
+Semantics: a failed step marks its transitive dependents `dependency_failed` (recorded, never silent)
+while independent branches keep running; `--budget` gates DISPATCH (in-flight steps finish; refused
+steps record `budget_refused`); relative `dir`/`prompt_file` resolve against the flow file; exit 0 only
+when every step is green. Trust/plumbing flags (`--isolate --skip-permissions --mcp-config --skills`)
+are flow-wide and **per-invocation — re-pass them on resume**: the saved copy never carries trust, and
+the first live smoke showed why you'll notice — without them, a claude step's edits fail closed while
+the model *claims* the write happened; the oracle stays red until the flags return.
+
+Live-proven (2026-07-21, haiku): a two-step flow went 1/2 green (the oracle caught the model writing
+`beta - alpha` for `beta-alpha` — the reply claimed success, the tree disagreed, the tree won), then
+`flow resume` served step one **cached** with zero model turns and re-ran only step two to all-green.
+
 ## Structured output — `--output-schema`
 
 `loom run --output-schema contract.json "..."` forces the worker's **final answer** through a JSON

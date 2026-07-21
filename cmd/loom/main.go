@@ -62,6 +62,8 @@ func main() {
 		err = cmdSessions(os.Args[2:])
 	case "runs":
 		err = cmdRuns(os.Args[2:])
+	case "flow":
+		err = cmdFlow(os.Args[2:])
 	case "serve":
 		err = cmdServe(os.Args[2:])
 	case "pair":
@@ -1304,8 +1306,10 @@ usage:
   loom send    --connect ws://host:port --token T --session NAME [--detach] "msg"   reattach-or-open, send
   loom await   --connect ws://host:port --token T --session NAME --turn ID [--last-reply] [--timeout S]  fetch a detached reply
   loom sessions --connect ws://host:port --token T             list resident sessions
-  loom runs                                                    list recent loom-run lifecycle records (running/heartbeat-stale/done/failed)
+  loom runs                                                    list recent loom-run lifecycle records (running/heartbeat-stale/done/failed) + today's per-backend spend
   loom runs tail <run-id>                                      print a run's streamed output.log (survives a dead wrapper)
+  loom flow run <file.json> [--budget N] [--concurrency N]     run a step DAG (each step = a session + a deterministic oracle; journaled)
+  loom flow resume <flow-id>                                   re-run a flow, SKIPPING steps whose oracle already passed (green = cached)
 
   --connect ws://host:port --token T   (on run/chat/send) drive a remote loom serve over websocket —
                                        the --agent/--model/--dir/--resume/opts are opened THERE
