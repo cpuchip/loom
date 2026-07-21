@@ -36,8 +36,17 @@ import (
 // permission config, where unapproved tools fail closed in headless run mode;
 // Consult rides the directive. opencode has NO native filesystem sandbox, so
 // Isolate is not enforceable here — wall it externally (docker/remote) when it
-// matters. Claude-specific opts (MCPConfig, AllowedTools, PermissionMode,
-// ClaudeHome, Image) are ignored; configure those in opencode.json instead.
+// matters.
+//
+// MCPConfig IS honored (local sessions): the claude-format JSON is translated at
+// Open into an opencode config document written to a temp file and handed to
+// every spawned turn via the OPENCODE_CONFIG env var (see mcpbridge.go; read
+// path verified live, opencode-ai 1.17.15). Remote sessions still ignore it —
+// the temp file exists only on this box. NOTE: in headless run mode opencode's
+// permission config still gates tool calls (unapproved tools fail closed), so
+// an MCP-wired seat may additionally need permissions granted in the user's
+// opencode config, or SkipPermissions (--auto). Other claude-specific opts
+// (AllowedTools, PermissionMode, ClaudeHome, Image) remain ignored.
 // The prompt travels as one argv element: fine for worker dispatches, but
 // Windows caps a command line at ~32K chars — don't feed whole flattened
 // transcripts through this backend.
@@ -52,7 +61,26 @@ func (b OpencodeBackend) Open(ctx context.Context, opts SessionOpts) (Session, e
 	if bin == "" {
 		bin = "opencode"
 	}
-	return &opencodeSession{bin: bin, opts: opts, sessionID: opts.Resume}, nil
+	s := &opencodeSession{bin: bin, opts: opts, sessionID: opts.Resume}
+	if opts.MCPConfig != "" && opts.Remote == "" {
+		data, err := opencodeMCPConfig(opts.MCPConfig)
+		if err != nil {
+			// Loud at Open, like claude's own startup exit on a bad --mcp-config.
+			return nil, fmt.Errorf("opencode: mcp-config: %w", err)
+		}
+		f, err := os.CreateTemp("", "loom-opencode-mcp-*.json")
+		if err != nil {
+			return nil, fmt.Errorf("opencode: mcp-config temp file: %w", err)
+		}
+		if _, err := f.Write(data); err != nil {
+			f.Close()
+			os.Remove(f.Name())
+			return nil, fmt.Errorf("opencode: mcp-config temp file: %w", err)
+		}
+		f.Close()
+		s.mcpConfigPath = f.Name()
+	}
+	return s, nil
 }
 
 type opencodeSession struct {
@@ -62,10 +90,11 @@ type opencodeSession struct {
 	turnMu sync.Mutex // one turn at a time; held across a SendStream turn
 	mu     sync.Mutex // guards the fields below (NOT held during the read)
 
-	sessionID   string
-	firstSent   bool
-	cur         *exec.Cmd
-	interrupted bool
+	sessionID     string
+	firstSent     bool
+	cur           *exec.Cmd
+	interrupted   bool
+	mcpConfigPath string // temp opencode.json translated from opts.MCPConfig at Open ("" = none); removed on Close
 }
 
 func (s *opencodeSession) Send(ctx context.Context, prompt string) (Reply, error) {
@@ -78,6 +107,7 @@ func (s *opencodeSession) SendStream(ctx context.Context, prompt string, onEvent
 
 	s.mu.Lock()
 	resume := s.sessionID
+	mcpPath := s.mcpConfigPath
 	if !s.firstSent && s.opts.SystemPromptFile != "" {
 		if data, err := os.ReadFile(s.opts.SystemPromptFile); err == nil && len(data) > 0 {
 			prompt = "<instructions>\n" + strings.TrimSpace(string(data)) + "\n</instructions>\n\n" + prompt
@@ -91,6 +121,13 @@ func (s *opencodeSession) SendStream(ctx context.Context, prompt string, onEvent
 	s.mu.Unlock()
 
 	cmd := onehotCmd(ctx, resolveOpencodeBin(s.bin), s.opts, opencodeArgs(s.opts, resume, prompt))
+	if mcpPath != "" {
+		// Hand every turn the translated MCP servers. OPENCODE_CONFIG is the only
+		// per-invocation config channel opencode offers (no CLI flag); set only
+		// when a bridge file exists so a plain session inherits the environment
+		// untouched. (Local-only by construction — see Open.)
+		cmd.Env = append(os.Environ(), "OPENCODE_CONFIG="+mcpPath)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return Reply{Backend: "opencode", Err: err.Error()}, err
@@ -294,6 +331,12 @@ func (s *opencodeSession) Close() error {
 	defer s.mu.Unlock()
 	if s.cur != nil && s.cur.Process != nil {
 		_ = s.cur.Process.Signal(os.Interrupt)
+	}
+	if s.mcpConfigPath != "" {
+		// A turn's process already read the config at startup; removing the file
+		// under a still-running turn is safe.
+		_ = os.Remove(s.mcpConfigPath)
+		s.mcpConfigPath = ""
 	}
 	return nil
 }

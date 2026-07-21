@@ -35,10 +35,16 @@ import (
 //	Isolate         → sandbox workspace-write                     (edits walled to the workdir)
 //	(none)          → codex's own config default
 //
-// Claude-specific opts with no codex analog (MCPConfig, AllowedTools,
-// PermissionMode, ClaudeHome, Image) are ignored; wire those through codex
-// config.toml / profiles instead. SystemPromptFile is approximated by prepending
-// the file's contents to the first prompt (codex has no append-system-prompt flag).
+// MCPConfig IS honored (local sessions): the claude-format JSON is translated at
+// Open into per-invocation `-c mcp_servers.<name>.<key>=…` config overrides (see
+// mcpbridge.go) — codex's native MCP surface, without touching the user's
+// ~/.codex/config.toml. A REMOTE session still ignores it: the config file is a
+// local path, and the remote transport joins argv through `bash -lc` unquoted,
+// which would mangle the TOML values — wire the remote box's own config.toml
+// instead. Claude-specific opts with no codex analog (AllowedTools,
+// PermissionMode, ClaudeHome, Image) remain ignored. SystemPromptFile is
+// approximated by prepending the file's contents to the first prompt (codex has
+// no append-system-prompt flag).
 type CodexBackend struct {
 	Bin string // default "codex"
 }
@@ -50,12 +56,22 @@ func (b CodexBackend) Open(ctx context.Context, opts SessionOpts) (Session, erro
 	if bin == "" {
 		bin = "codex"
 	}
-	return &codexSession{bin: bin, opts: opts, threadID: opts.Resume}, nil
+	var mcpArgs []string
+	if opts.MCPConfig != "" && opts.Remote == "" {
+		var err error
+		if mcpArgs, err = codexMCPArgs(opts.MCPConfig); err != nil {
+			// Fail at Open, like claude's own startup exit on a bad --mcp-config —
+			// a misconfigured hinge should be loud, not a silently toolless worker.
+			return nil, fmt.Errorf("codex: mcp-config: %w", err)
+		}
+	}
+	return &codexSession{bin: bin, opts: opts, threadID: opts.Resume, mcpArgs: mcpArgs}, nil
 }
 
 type codexSession struct {
-	bin  string
-	opts SessionOpts
+	bin     string
+	opts    SessionOpts
+	mcpArgs []string // `-c mcp_servers.…` overrides translated from opts.MCPConfig at Open (immutable)
 
 	turnMu sync.Mutex // one turn at a time; held across a SendStream turn
 	mu     sync.Mutex // guards the fields below (NOT held during the read)
@@ -80,7 +96,7 @@ func (s *codexSession) SendStream(ctx context.Context, prompt string, onEvent fu
 	s.interrupted = false
 	s.mu.Unlock()
 
-	cmd := codexCmd(ctx, s.bin, s.opts, codexArgs(s.opts, resume))
+	cmd := codexCmd(ctx, s.bin, s.opts, codexArgs(s.opts, resume, s.mcpArgs))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return Reply{Backend: "codex", Err: err.Error()}, err
@@ -231,9 +247,11 @@ func handleCodexLine(line []byte, r *Reply, onEvent func(Event)) {
 
 // codexArgs builds the argv for one turn. Turn 1 is `exec` (full flag set); later
 // turns are `exec resume <id>` (narrower set: no -s/-C — sandbox rides -c, and the
-// workdir is the session's). The `-` sentinel reads the prompt from stdin (no
-// ARG_MAX, no shell-quoting through ssh).
-func codexArgs(opts SessionOpts, resume string) []string {
+// workdir is the session's). mcpArgs (the `-c mcp_servers.…` overrides) ride EVERY
+// turn — each turn is a fresh codex process that must re-wire its MCP servers; -c
+// is accepted by `exec resume` too (same mechanism the resumed sandbox uses). The
+// `-` sentinel reads the prompt from stdin (no ARG_MAX, no shell-quoting through ssh).
+func codexArgs(opts SessionOpts, resume string, mcpArgs []string) []string {
 	initial := resume == ""
 	args := []string{"exec"}
 	if !initial {
@@ -255,6 +273,7 @@ func codexArgs(opts SessionOpts, resume string) []string {
 	case opts.Isolate:
 		args = append(args, sandboxArgs(initial, "workspace-write")...)
 	}
+	args = append(args, mcpArgs...)
 	return append(args, "-") // prompt from stdin
 }
 
