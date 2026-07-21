@@ -41,12 +41,17 @@ pins, everything else → claude) instead of hardwiring claude:
 | **claude** | `--mcp-config <file>` natively | `~/.claude/skills/` (ships in the mounted `--claude-home`) + project `.claude/skills/` |
 | **codex** | translated → `-c mcp_servers.<name>.…` overrides per invocation (mcpbridge.go; **live tool-call proven**, codex-cli 0.144.6; local sessions only) | `$CODEX_HOME/skills/` + project `.codex/skills/` + project `.agents/skills/` (discovery verified via `codex debug prompt-input`; does NOT read `.claude/skills/`) |
 | **copilot** | `--additional-mcp-config @<file>` natively (same JSON shape) | project `.claude/skills/` / `.github/skills/` / `.agents/skills/` + personal `~/.copilot/skills/` / `~/.agents/skills/` (verified via `copilot skill list`; no per-invocation flag — discovery is directory-driven) |
-| **opencode** | translated → temp `opencode.json` via `OPENCODE_CONFIG` env (mcpbridge.go; **live tool-call proven**, opencode-ai 1.17.15; local sessions only — headless permission gating may need `--skip-permissions`) | none found — no skills surface in its CLI; its extension model is agents/plugins/AGENTS.md |
+| **opencode** | translated → temp `opencode.json` via `OPENCODE_CONFIG` env (mcpbridge.go; **live tool-call proven**, opencode-ai 1.17.15; local sessions only — headless permission gating may need `--skip-permissions`) | native `skill` tool, on-demand: `.opencode/skills/` + **`.claude/skills/`** + `~/.agents/skills/` + `~/.config/opencode/skills/` (verified via `opencode debug skill`, opencode-ai 1.17.15 — it DOES read Claude-format skills) |
 | **agy** | not carried (structurally limited, below) | none |
 
-**The cross-provider skills lever is a directory, not a flag:** put skills in the *workdir's* `.agents/skills/`
-and both codex and copilot discover them; add `.claude/skills/` for claude+copilot. loom already delivers the
-workdir (`--dir`, shim role-workdirs), so skills ride the corpus — nothing to configure in loom itself.
+**The cross-provider skills lever is a directory, not a protocol** — the harnesses split on which they read:
+`.claude/skills/` reaches claude + copilot + opencode; `.agents/skills/` reaches codex + copilot + opencode.
+Neither alone hits all four, but the two together do — and copilot + opencode **dedupe a same-named skill by
+name** (verified), so mirroring into both never double-loads. loom automates this: **`--skills <dir>`** takes a
+source folder of `<name>/SKILL.md` skills and mirrors them into BOTH `.claude/skills/` and `.agents/skills/` of
+the session workdir at `Open`, so whichever backend runs discovers them — author once, every harness sees it.
+Local only (a remote box owns its filesystem); a same-named target skill is replaced by the authored source,
+other skills left untouched.
 
 **Why agy is the awkward one:** agy has **no working stdio/stream-json mode** — it's an open, Google-acknowledged gap (antigravity-cli issues [#76](https://github.com/google-antigravity/antigravity-cli/issues/76) stdout-drop, [#119](https://github.com/google-antigravity/antigravity-cli/issues/119) stream-json parity, [#31](https://github.com/google-antigravity/antigravity-cli/issues/31) `--acp`); `--output-format json` is currently *rejected*. The two real workarounds are **transcript-scrape** (what loom does — the right path on Windows) or a **pseudo-TTY wrap** (`script -qec '…' /dev/null`, Unix-only). When agy ships stream-json, the agy backend swaps to the clean path and drops the scrape.
 
