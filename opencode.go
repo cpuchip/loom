@@ -61,7 +61,7 @@ func (b OpencodeBackend) Open(ctx context.Context, opts SessionOpts) (Session, e
 	if bin == "" {
 		bin = "opencode"
 	}
-	if err := mirrorSkills(opts); err != nil {
+	if err := mirrorSkills(opts, "opencode"); err != nil {
 		return nil, fmt.Errorf("opencode: %w", err)
 	}
 	s := &opencodeSession{bin: bin, opts: opts, sessionID: opts.Resume}
