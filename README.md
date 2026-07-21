@@ -46,12 +46,12 @@ pins, everything else → claude) instead of hardwiring claude:
 
 **The cross-provider skills lever is a directory, not a protocol** — the harnesses split on which they read:
 `.claude/skills/` reaches claude + copilot + opencode; `.agents/skills/` reaches codex + copilot + opencode.
-Neither alone hits all four, but the two together do — and copilot + opencode **dedupe a same-named skill by
-name** (verified), so mirroring into both never double-loads. loom automates this: **`--skills <dir>`** takes a
-source folder of `<name>/SKILL.md` skills and mirrors them into BOTH `.claude/skills/` and `.agents/skills/` of
-the session workdir at `Open`, so whichever backend runs discovers them — author once, every harness sees it.
-Local only (a remote box owns its filesystem); a same-named target skill is replaced by the authored source,
-other skills left untouched.
+Neither alone hits all four, but between them every backend is covered. loom automates this with **`--skills
+<dir>`**: a source folder of `<name>/SKILL.md` skills, mirrored at `Open` into the skill dir the **backend being
+run** reads — `claude → .claude/skills/`, `codex → .agents/skills/`, `copilot`/`opencode → .claude/skills/`
+(they read both, so one copy suffices). loom always knows its backend at `Open`, so it writes exactly one place,
+no redundant copies. Author once, the harness sees it. Local only (a remote box owns its filesystem); a
+same-named target skill is replaced by the authored source, other skills left untouched.
 
 **Why agy is the awkward one:** agy has **no working stdio/stream-json mode** — it's an open, Google-acknowledged gap (antigravity-cli issues [#76](https://github.com/google-antigravity/antigravity-cli/issues/76) stdout-drop, [#119](https://github.com/google-antigravity/antigravity-cli/issues/119) stream-json parity, [#31](https://github.com/google-antigravity/antigravity-cli/issues/31) `--acp`); `--output-format json` is currently *rejected*. The two real workarounds are **transcript-scrape** (what loom does — the right path on Windows) or a **pseudo-TTY wrap** (`script -qec '…' /dev/null`, Unix-only). When agy ships stream-json, the agy backend swaps to the clean path and drops the scrape.
 

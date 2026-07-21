@@ -57,7 +57,7 @@ func (b CopilotBackend) Open(ctx context.Context, opts SessionOpts) (Session, er
 	if bin == "" {
 		bin = "copilot"
 	}
-	if err := mirrorSkills(opts); err != nil {
+	if err := mirrorSkills(opts, "copilot"); err != nil {
 		return nil, fmt.Errorf("copilot: %w", err)
 	}
 	return &copilotSession{bin: bin, opts: opts, sessionID: opts.Resume}, nil

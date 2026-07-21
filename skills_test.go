@@ -32,28 +32,93 @@ func exists(path string) bool {
 	return err == nil
 }
 
-// TestMirrorSkills_BothTargets — a skill lands in BOTH .claude/skills and
-// .agents/skills of the workdir, with supporting files intact.
-func TestMirrorSkills_BothTargets(t *testing.T) {
+// TestSkillDirsFor — each backend maps to exactly the skill dir(s) it reads.
+func TestSkillDirsFor(t *testing.T) {
+	claudeDir := filepath.Join(".claude", "skills")
+	agentsDir := filepath.Join(".agents", "skills")
+	cases := map[string][]string{
+		"claude":   {claudeDir},
+		"codex":    {agentsDir},
+		"copilot":  {claudeDir}, // reads both; one copy suffices
+		"opencode": {claudeDir}, // reads both; one copy suffices
+		"agy":      nil,
+		"local":    nil,
+		"unknown":  nil,
+	}
+	for backend, want := range cases {
+		got := skillDirsFor(backend)
+		if len(got) != len(want) {
+			t.Errorf("skillDirsFor(%q) = %v, want %v", backend, got, want)
+			continue
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("skillDirsFor(%q)[%d] = %q, want %q", backend, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+// TestMirrorSkills_PerBackendTarget — loom writes ONLY the dir the target backend
+// reads: claude→.claude/skills (not .agents), codex→.agents/skills (not .claude),
+// copilot/opencode→.claude/skills (the single shared dir).
+func TestMirrorSkills_PerBackendTarget(t *testing.T) {
+	claudeRel := filepath.Join(".claude", "skills", "greet", "SKILL.md")
+	agentsRel := filepath.Join(".agents", "skills", "greet", "SKILL.md")
+
+	newSrc := func() string {
+		s := t.TempDir()
+		writeSkill(t, s, "greet", "---\nname: greet\ndescription: d\n---\nx")
+		return s
+	}
+
+	// claude → .claude only
+	work := t.TempDir()
+	if err := mirrorSkills(SessionOpts{SkillsDir: newSrc(), Workdir: work}, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(filepath.Join(work, claudeRel)) || exists(filepath.Join(work, agentsRel)) {
+		t.Error("claude should write .claude/skills ONLY")
+	}
+
+	// codex → .agents only
+	work = t.TempDir()
+	if err := mirrorSkills(SessionOpts{SkillsDir: newSrc(), Workdir: work}, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(filepath.Join(work, agentsRel)) || exists(filepath.Join(work, claudeRel)) {
+		t.Error("codex should write .agents/skills ONLY")
+	}
+
+	// copilot / opencode → .claude only (one copy for a both-reader)
+	for _, backend := range []string{"copilot", "opencode"} {
+		work = t.TempDir()
+		if err := mirrorSkills(SessionOpts{SkillsDir: newSrc(), Workdir: work}, backend); err != nil {
+			t.Fatal(err)
+		}
+		if !exists(filepath.Join(work, claudeRel)) || exists(filepath.Join(work, agentsRel)) {
+			t.Errorf("%s should write .claude/skills ONLY (one copy)", backend)
+		}
+	}
+}
+
+// TestMirrorSkills_CopiesTreeAndSupportingFiles — a skill's supporting files travel.
+func TestMirrorSkills_CopiesTreeAndSupportingFiles(t *testing.T) {
 	src := t.TempDir()
 	work := t.TempDir()
 	writeSkill(t, src, "greet", "---\nname: greet\ndescription: d\n---\nhello")
-	// a supporting file should travel with the skill
 	if err := os.WriteFile(filepath.Join(src, "greet", "ref.txt"), []byte("ref"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work}); err != nil {
-		t.Fatalf("mirrorSkills: %v", err)
+	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work}, "claude"); err != nil {
+		t.Fatal(err)
 	}
-	for _, rel := range []string{".claude/skills", ".agents/skills"} {
-		skillMd := filepath.Join(work, filepath.FromSlash(rel), "greet", "SKILL.md")
-		if got := read(t, skillMd); got != "---\nname: greet\ndescription: d\n---\nhello" {
-			t.Errorf("%s content wrong: %q", rel, got)
-		}
-		if !exists(filepath.Join(work, filepath.FromSlash(rel), "greet", "ref.txt")) {
-			t.Errorf("%s: supporting file ref.txt did not travel", rel)
-		}
+	base := filepath.Join(work, ".claude", "skills", "greet")
+	if got := read(t, filepath.Join(base, "SKILL.md")); got != "---\nname: greet\ndescription: d\n---\nhello" {
+		t.Errorf("SKILL.md content wrong: %q", got)
+	}
+	if !exists(filepath.Join(base, "ref.txt")) {
+		t.Error("supporting file ref.txt did not travel")
 	}
 }
 
@@ -70,18 +135,15 @@ func TestMirrorSkills_MultipleAndIgnoresNonSkills(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "not-a-skill", "readme.md"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work}); err != nil {
+	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work}, "claude"); err != nil {
 		t.Fatal(err)
 	}
-	for _, rel := range []string{".claude/skills", ".agents/skills"} {
-		base := filepath.Join(work, filepath.FromSlash(rel))
-		if !exists(filepath.Join(base, "alpha", "SKILL.md")) || !exists(filepath.Join(base, "beta", "SKILL.md")) {
-			t.Errorf("%s: alpha/beta not both mirrored", rel)
-		}
-		if exists(filepath.Join(base, "not-a-skill")) {
-			t.Errorf("%s: non-skill dir should not be mirrored", rel)
-		}
+	base := filepath.Join(work, ".claude", "skills")
+	if !exists(filepath.Join(base, "alpha", "SKILL.md")) || !exists(filepath.Join(base, "beta", "SKILL.md")) {
+		t.Error("alpha/beta not both mirrored")
+	}
+	if exists(filepath.Join(base, "not-a-skill")) {
+		t.Error("non-skill dir should not be mirrored")
 	}
 }
 
@@ -97,7 +159,7 @@ func TestMirrorSkills_SingleSkillSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	work := t.TempDir()
-	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work}); err != nil {
+	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work}, "claude"); err != nil {
 		t.Fatal(err)
 	}
 	if !exists(filepath.Join(work, ".claude", "skills", "solo", "SKILL.md")) {
@@ -113,7 +175,6 @@ func TestMirrorSkills_ReplacesSameNameKeepsOthers(t *testing.T) {
 	work := t.TempDir()
 	writeSkill(t, src, "greet", "---\nname: greet\ndescription: new\n---\nNEW")
 
-	// Pre-existing target: an old greet (with a stale file) + an unrelated skill.
 	oldGreet := filepath.Join(work, ".claude", "skills", "greet")
 	if err := os.MkdirAll(oldGreet, 0o755); err != nil {
 		t.Fatal(err)
@@ -122,42 +183,50 @@ func TestMirrorSkills_ReplacesSameNameKeepsOthers(t *testing.T) {
 	os.WriteFile(filepath.Join(oldGreet, "stale.txt"), []byte("stale"), 0o644)
 	writeSkill(t, filepath.Join(work, ".claude", "skills"), "mine", "---\nname: mine\ndescription: m\n---\nMINE")
 
-	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work}); err != nil {
+	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work}, "claude"); err != nil {
 		t.Fatal(err)
 	}
-	// greet replaced with new content, stale file gone.
 	if got := read(t, filepath.Join(oldGreet, "SKILL.md")); got != "---\nname: greet\ndescription: new\n---\nNEW" {
 		t.Errorf("greet not replaced: %q", got)
 	}
 	if exists(filepath.Join(oldGreet, "stale.txt")) {
 		t.Error("stale file survived replacement")
 	}
-	// the user's unrelated skill survives.
 	if !exists(filepath.Join(work, ".claude", "skills", "mine", "SKILL.md")) {
 		t.Error("unrelated existing skill was clobbered")
 	}
 }
 
-// TestMirrorSkills_NoOps — remote sessions and an empty SkillsDir do nothing.
+// TestMirrorSkills_NoOps — remote sessions, an empty SkillsDir, and a backend that
+// reads no skills (agy/local) all do nothing.
 func TestMirrorSkills_NoOps(t *testing.T) {
 	src := t.TempDir()
 	writeSkill(t, src, "greet", "---\nname: greet\ndescription: d\n---\nx")
 
-	// Remote → no-op (must not write locally).
+	// Remote → no-op.
 	work := t.TempDir()
-	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work, Remote: "user@host"}); err != nil {
+	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work, Remote: "user@host"}, "claude"); err != nil {
 		t.Fatal(err)
 	}
 	if exists(filepath.Join(work, ".claude", "skills", "greet")) {
 		t.Error("remote session must not mirror skills locally")
 	}
 
-	// Empty SkillsDir → no-op.
+	// A no-skills backend → no-op even with a source.
 	work2 := t.TempDir()
-	if err := mirrorSkills(SessionOpts{Workdir: work2}); err != nil {
+	if err := mirrorSkills(SessionOpts{SkillsDir: src, Workdir: work2}, "agy"); err != nil {
 		t.Fatal(err)
 	}
-	if exists(filepath.Join(work2, ".claude")) {
+	if exists(filepath.Join(work2, ".claude")) || exists(filepath.Join(work2, ".agents")) {
+		t.Error("a no-skills backend should create nothing")
+	}
+
+	// Empty SkillsDir → no-op.
+	work3 := t.TempDir()
+	if err := mirrorSkills(SessionOpts{Workdir: work3}, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if exists(filepath.Join(work3, ".claude")) {
 		t.Error("empty SkillsDir should create nothing")
 	}
 }

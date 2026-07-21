@@ -119,7 +119,7 @@ func addSessionFlags(fs *flag.FlagSet) *sessFlags {
 		consult:       fs.Bool("consult", false, "read-only consult: inject an answer-don't-act directive so a QUESTION drive doesn't sprawl into edits/commits/journaling"),
 		sysPromptFile: fs.String("system-prompt-file", "", "claude --append-system-prompt-file: inject instructions"),
 		claudeHome:    fs.String("claude-home", "", "(--isolate) host dir mounted as the container's ~/.claude: skills/instructions/settings/MCP + PERSISTED sessions (enables resume+isolate)"),
-		skills:        fs.String("skills", "", "source dir of authored skills (each a <name>/SKILL.md folder) — mirrored into BOTH .claude/skills/ and .agents/skills/ of the workdir so any backend (claude/codex/copilot/opencode) discovers them; local only"),
+		skills:        fs.String("skills", "", "source dir of authored skills (each a <name>/SKILL.md folder) — mirrored into the skill dir the TARGET backend reads (claude→.claude/skills, codex→.agents/skills, copilot/opencode→.claude/skills) within the workdir; local only"),
 		connect:       fs.String("connect", "", "drive a remote `loom serve` over websocket (ws://host:port, or wss://host:port for pinned mTLS) — the --agent/opts are opened THERE"),
 		token:         fs.String("token", "", "auth token for --connect"),
 		peer:          fs.String("peer", "", "(--connect wss://) the pinned peer name you paired with (loom pair)"),

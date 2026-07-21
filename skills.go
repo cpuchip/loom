@@ -1,19 +1,20 @@
 package loom
 
-// skills.go — "author once, every harness sees it." A skill authored in one
-// source directory is mirrored into BOTH .claude/skills/ and .agents/skills/ of a
-// session's workdir, because the agentic backends split on which they read:
+// skills.go — "author once, the harness sees it." A skill authored in one source
+// directory is mirrored into the session workdir at the exact skill folder the
+// backend BEING RUN reads — nothing redundant, because Open always knows its
+// backend. The agentic backends split on which folder they read:
 //
 //	claude    → .claude/skills/                (only)
 //	codex     → .agents/skills/                (only)
 //	copilot   → .claude/skills/ AND .agents/skills/
 //	opencode  → .claude/skills/ AND .agents/skills/  (+ .opencode/skills/)
 //
-// Neither directory alone reaches all four, but the two together do — and copilot
-// and opencode DEDUPE a same-named skill by name (verified against copilot 1.x and
-// opencode 1.17), so mirroring the same skill into both never double-loads it.
+// So loom writes .claude/skills/ for claude, .agents/skills/ for codex, and — for
+// copilot/opencode, which read both — the single .claude/skills/ (one copy is
+// enough; they'd dedupe a mirrored pair by name anyway). agy/local read no skills.
 // This is a filesystem convention, not a protocol: loom just places the files
-// where each harness already looks. Local only — a remote session's filesystem is
+// where the harness already looks. Local only — a remote session's filesystem is
 // owned by that box.
 
 import (
@@ -23,20 +24,32 @@ import (
 	"path/filepath"
 )
 
-// skillTargets are the two workdir-relative skill roots that together cover every
-// agentic backend (see the package comment).
-var skillTargets = []string{
-	filepath.Join(".claude", "skills"),
-	filepath.Join(".agents", "skills"),
+// skillDirsFor returns the workdir-relative skill directories the given backend
+// actually reads. Writing exactly these (rather than every possible dir) keeps the
+// workdir clean: claude and codex each read one; copilot and opencode read both,
+// so the single shared .claude/skills/ suffices. agy/local read no skills → nil.
+func skillDirsFor(backend string) []string {
+	switch backend {
+	case "claude":
+		return []string{filepath.Join(".claude", "skills")}
+	case "codex":
+		return []string{filepath.Join(".agents", "skills")}
+	case "copilot", "opencode":
+		// Both read .claude/skills/ (and .agents/skills/); one copy is enough.
+		return []string{filepath.Join(".claude", "skills")}
+	default:
+		return nil
+	}
 }
 
-// mirrorSkills copies every skill under opts.SkillsDir into both skillTargets of
-// the session workdir. No-op when SkillsDir is unset or the session is remote. The
-// target is opts.Workdir, or the current working directory when Workdir is empty
-// (matching how a backend with an empty Workdir resolves its cwd). A same-named
-// skill already present in a target is REPLACED (the authored source is
-// authoritative); other skills in the target are left untouched.
-func mirrorSkills(opts SessionOpts) error {
+// mirrorSkills copies every skill under opts.SkillsDir into the skill dir(s) the
+// given backend reads, within the session workdir. No-op when SkillsDir is unset,
+// the session is remote, or the backend reads no skills. The target is
+// opts.Workdir, or the current working directory when Workdir is empty (matching
+// how a backend with an empty Workdir resolves its cwd). A same-named skill already
+// present is REPLACED (the authored source is authoritative); other skills are left
+// untouched.
+func mirrorSkills(opts SessionOpts, backend string) error {
 	if opts.SkillsDir == "" {
 		return nil
 	}
@@ -44,6 +57,10 @@ func mirrorSkills(opts SessionOpts) error {
 		// The remote box owns its filesystem; skills there must be provisioned on
 		// that box. Documented, not silent (callers may log this).
 		return nil
+	}
+	dirs := skillDirsFor(backend)
+	if len(dirs) == 0 {
+		return nil // this backend reads no skills
 	}
 	target := opts.Workdir
 	if target == "" {
@@ -58,7 +75,7 @@ func mirrorSkills(opts SessionOpts) error {
 		return fmt.Errorf("mirror skills from %q: %w", opts.SkillsDir, err)
 	}
 	for _, sk := range skills {
-		for _, rel := range skillTargets {
+		for _, rel := range dirs {
 			dest := filepath.Join(target, rel, sk.name)
 			if err := os.RemoveAll(dest); err != nil {
 				return fmt.Errorf("mirror skill %q: clear %q: %w", sk.name, dest, err)
