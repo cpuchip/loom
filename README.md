@@ -138,6 +138,47 @@ status, text, cost_usd}`. Both session ids surface so either seat can be resumed
 (`loom run --resume <id>`, `--consult` for the critic). `--events` streams both seats' tool calls to
 stderr, tagged `[worker]`/`[critic]`.
 
+## Structured output — `--output-schema`
+
+`loom run --output-schema contract.json "..."` forces the worker's **final answer** through a JSON
+Schema, so a foreman parses a contract instead of regex-mining prose. The schema is appended to the
+prompt (a model can't hit a contract it never saw), the reply's JSON is extracted tolerantly (whole
+reply, ` ```json ` fences, or the first decodable value in prose), and validated. On failure loom
+**re-prompts once** with the violations + the schema; still invalid → non-zero exit with the errors on
+stderr. With `--json`, the validated object rides the Reply as a `parsed` field. Works on `send` too
+(not `--detach` — there's no session at hand to re-prompt).
+
+The validator is a deliberate hand-rolled **subset** (loom stays zero-dependency): `type` (incl.
+`integer`, multi-type arrays), `properties`/`required` (unknown keys allowed), `items`, `enum`,
+`minimum`/`maximum`, `minLength`/`maxLength`, `minItems`/`maxItems`. Anything else (`$ref`, `oneOf`,
+`pattern`, `format`, …) is ignored, not rejected — keep contracts inside the subset.
+
+## Usage + budget — what a turn cost, and a ceiling on the loop
+
+Every Reply (and every run manifest) now carries a normalized `usage` block — tokens, USD, and a
+`cost_source` marker that keeps the fidelity honest. Each backend reports exactly what its CLI emits
+(all four shapes live-captured 2026-07-20), never an invented number:
+
+| backend  | tokens                                                    | USD                          | cost_source |
+|----------|-----------------------------------------------------------|------------------------------|-------------|
+| claude   | in / out / cache-read / cache-write (per turn)             | **real** (per-turn delta)    | `real`      |
+| opencode | in / out(+reasoning) / cache-read / cache-write (per step) | **real** (summed steps)      | `real`      |
+| codex    | in (fresh, cached split out) / out / cache-read            | none reported                | `none`      |
+| copilot  | output tokens only + `premium_requests` (its billing unit) | none reported                | `none`      |
+| local    | in / out (standard OpenAI usage block)                     | none reported (locally free) | `none`      |
+| agy      | nothing machine-readable                                   | none                         | `none`      |
+
+`loom runs` sums **today** per backend under its table (`claude 3 run(s) $0.41`, `codex 2 run(s)
+84,120 tokens`). `cost_source: "estimated"` is reserved for a future price-table experiment — nothing
+sets it today.
+
+`--budget <n>` (on `run`, `send`, `chat`, `duo`) is a spend ceiling with **one number, two meters**:
+a turn with real USD counts its dollars against the limit; a token-only turn counts its **total
+tokens** against the same limit; either meter crossing refuses **further** turns (the turn in flight
+always completes). `duo` ends with status `budget_exceeded`; `chat` refuses the next line; on
+`run`/`send` the budget gates the `--output-schema` retry turn. A backend reporting neither (agy) is
+invisible to the budget — pair it with `--rounds`-style caps instead.
+
 ## Sessions — carry & resume
 
 Two different guarantees, both verified on the real path:
