@@ -32,6 +32,9 @@ func (b ClaudeBackend) Open(ctx context.Context, opts SessionOpts) (Session, err
 	if bin == "" {
 		bin = "claude"
 	}
+	if err := mirrorSkills(opts); err != nil {
+		return nil, fmt.Errorf("claude: %w", err)
+	}
 	return &claudeSession{bin: bin, opts: opts}, nil
 }
 

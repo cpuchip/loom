@@ -56,6 +56,9 @@ func (b CodexBackend) Open(ctx context.Context, opts SessionOpts) (Session, erro
 	if bin == "" {
 		bin = "codex"
 	}
+	if err := mirrorSkills(opts); err != nil {
+		return nil, fmt.Errorf("codex: %w", err)
+	}
 	var mcpArgs []string
 	if opts.MCPConfig != "" && opts.Remote == "" {
 		var err error

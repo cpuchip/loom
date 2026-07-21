@@ -61,6 +61,9 @@ func (b OpencodeBackend) Open(ctx context.Context, opts SessionOpts) (Session, e
 	if bin == "" {
 		bin = "opencode"
 	}
+	if err := mirrorSkills(opts); err != nil {
+		return nil, fmt.Errorf("opencode: %w", err)
+	}
 	s := &opencodeSession{bin: bin, opts: opts, sessionID: opts.Resume}
 	if opts.MCPConfig != "" && opts.Remote == "" {
 		data, err := opencodeMCPConfig(opts.MCPConfig)

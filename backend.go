@@ -47,6 +47,13 @@ type SessionOpts struct {
 	SystemPromptFile string // claude --append-system-prompt-file: inject instructions
 	ClaudeHome       string // (--isolate) host dir mounted as the container's writable ~/.claude: skills/instructions/settings/MCP + PERSISTED session state (this is what makes resume+isolate work)
 	Consult          bool   // read-only "consult" drive: inject a directive so a QUESTION drive doesn't sprawl into edits/commits/journaling (instruction-level, not a hard sandbox — use AllowedTools for enforcement)
+
+	// SkillsDir is a source directory of authored skills (each a <name>/SKILL.md
+	// folder, or a single skill folder). At Open, loom mirrors them into BOTH
+	// .claude/skills/ and .agents/skills/ of the session workdir so whichever
+	// backend runs discovers them — "author once, every harness sees it" (see
+	// skills.go). Local only; ignored for a remote session. "" = no skills.
+	SkillsDir string
 }
 
 // Backend is a driveable agent CLI.
