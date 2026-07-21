@@ -187,7 +187,13 @@ func handleCodexLine(line []byte, r *Reply, onEvent func(Event)) {
 		Type     string `json:"type"`
 		ThreadID string `json:"thread_id"`
 		Message  string `json:"message"`
-		Error    struct {
+		Usage    struct {
+			InputTokens           int `json:"input_tokens"`
+			CachedInputTokens     int `json:"cached_input_tokens"`
+			OutputTokens          int `json:"output_tokens"`
+			ReasoningOutputTokens int `json:"reasoning_output_tokens"`
+		} `json:"usage"`
+		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
 		Item struct {
@@ -235,6 +241,20 @@ func handleCodexLine(line []byte, r *Reply, onEvent func(Event)) {
 		}
 	case "turn.completed":
 		r.Turns++
+		// Live shape 2026-07-20 (codex-cli 0.14x): usage{input_tokens,
+		// cached_input_tokens, output_tokens, reasoning_output_tokens}. codex's
+		// input_tokens INCLUDES the cached portion — subtract it so InputTokens
+		// means "fresh input" on every backend. Tokens only; codex reports no
+		// USD. Accumulated (+=) because one Send can complete multiple turns.
+		u := ev.Usage
+		if u.InputTokens+u.CachedInputTokens+u.OutputTokens > 0 {
+			r.Usage = addUsage(r.Usage, &Usage{
+				InputTokens:     max(u.InputTokens-u.CachedInputTokens, 0),
+				OutputTokens:    u.OutputTokens,
+				CacheReadTokens: u.CachedInputTokens,
+				CostSource:      CostNone,
+			})
+		}
 	case "turn.failed":
 		if ev.Error.Message != "" {
 			r.Err = ev.Error.Message

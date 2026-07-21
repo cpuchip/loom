@@ -38,6 +38,7 @@ const (
 const (
 	duoStatusDone      = "done"
 	duoStatusExhausted = "rounds_exhausted"
+	duoStatusBudget    = "budget_exceeded"
 )
 
 // The routing messages loom sends into the WORKER session between rounds. REVISE prefixes
@@ -60,6 +61,11 @@ type DuoConfig struct {
 	Task       string
 	Rounds     int // <= 0 → DuoDefaultRounds
 	Observer   DuoObserver
+	// Budget, when non-nil, is the loop's spend ceiling (see usage.go): both
+	// seats' turns accumulate into it, and once exceeded the loop REFUSES to
+	// start another round — status "budget_exceeded", last report kept. A round
+	// in flight is never aborted mid-turn.
+	Budget *Budget
 }
 
 // DuoRound is the critic's judgment at one build point — what the JSON output carries per
@@ -178,12 +184,20 @@ func Duo(ctx context.Context, cfg DuoConfig) (res DuoResult, err error) {
 	workerPrompt := cfg.Task + "\n\n" + duoWorkerPreamble
 
 	for round := 1; round <= rounds; round++ {
+		// The budget gates ROUND STARTS: the round that crosses the ceiling
+		// finishes (including its critic verdict), the next never begins.
+		if cfg.Budget.Exceeded() {
+			obs.warn(fmt.Sprintf("budget exceeded before round %d (%s) — refusing further turns", round, cfg.Budget))
+			res.Status = duoStatusBudget
+			return res, nil
+		}
 		obs.round(round)
 
 		wReply, werr := duoSend(ctx, workerSess, workerPrompt, obs.WorkerEvent)
 		if werr != nil {
 			return res, fmt.Errorf("duo: worker turn %d: %w", round, werr)
 		}
+		cfg.Budget.Note(wReply)
 		res.CostUSD += wReply.CostUSD
 		res.Text = wReply.Text
 		obs.workerReply(round, wReply.Text)
@@ -202,6 +216,7 @@ func Duo(ctx context.Context, cfg DuoConfig) (res DuoResult, err error) {
 		if cerr != nil {
 			return res, fmt.Errorf("duo: critic turn %d: %w", round, cerr)
 		}
+		cfg.Budget.Note(cReply)
 		res.CostUSD += cReply.CostUSD
 
 		verdict, feedback, ok := parseVerdict(cReply.Text)

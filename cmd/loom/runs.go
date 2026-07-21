@@ -37,7 +37,69 @@ func cmdRuns(args []string) error {
 		fmt.Printf("%-24s  %-16s  %-12s  %-8s  %s\n",
 			r.man.RunID, r.status, backendLabel(r.man), humanAge(r.age), r.note)
 	}
+	for _, line := range summarizeDay(rows, time.Now()) {
+		fmt.Println(line)
+	}
 	return nil
+}
+
+// summarizeDay renders the per-backend spend totals for runs STARTED today
+// (local time) — the fleet-level "what did today cost" view (parity #3). Each
+// backend's line reports what its runs honestly recorded: real USD where the
+// CLI reports cost, tokens where it reports only tokens, and an unreported
+// count for runs whose manifest carries neither (old manifests, agy, crashes).
+// Empty when no runs started today.
+func summarizeDay(rows []runRow, now time.Time) []string {
+	type agg struct {
+		runs, tokens, unreported int
+		usd                      float64
+	}
+	y, m, d := now.Date()
+	perBackend := map[string]*agg{}
+	var order []string
+	for _, r := range rows {
+		ry, rm, rd := r.man.StartedAt.Local().Date()
+		if ry != y || rm != m || rd != d {
+			continue
+		}
+		a := perBackend[r.man.Backend]
+		if a == nil {
+			a = &agg{}
+			perBackend[r.man.Backend] = a
+			order = append(order, r.man.Backend)
+		}
+		a.runs++
+		switch u := r.man.Usage; {
+		case u != nil && u.CostSource == loom.CostReal:
+			a.usd += u.CostUSD
+		case u != nil && u.TotalTokens() > 0:
+			a.tokens += u.TotalTokens()
+		case r.man.CostUSD > 0: // pre-Usage manifests recorded bare cost
+			a.usd += r.man.CostUSD
+		default:
+			a.unreported++
+		}
+	}
+	if len(order) == 0 {
+		return nil
+	}
+	sort.Strings(order)
+	out := []string{"", "today:"}
+	for _, b := range order {
+		a := perBackend[b]
+		line := fmt.Sprintf("  %-12s  %d run(s)", b, a.runs)
+		if a.usd > 0 {
+			line += fmt.Sprintf("  $%.4f", a.usd)
+		}
+		if a.tokens > 0 {
+			line += fmt.Sprintf("  %d tokens", a.tokens)
+		}
+		if a.unreported > 0 {
+			line += fmt.Sprintf("  (%d unreported)", a.unreported)
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 // runRow is one recorded run plus its derived status.

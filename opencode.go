@@ -185,10 +185,19 @@ func handleOpencodeLine(line []byte, r *Reply, onEvent func(Event)) {
 		SessionID string `json:"sessionID"`
 		Message   string `json:"message"`
 		Part      struct {
-			Type  string  `json:"type"`
-			Text  string  `json:"text"`
-			Tool  string  `json:"tool"`
-			Cost  float64 `json:"cost"`
+			Type   string  `json:"type"`
+			Text   string  `json:"text"`
+			Tool   string  `json:"tool"`
+			Cost   float64 `json:"cost"`
+			Tokens struct {
+				Input     int `json:"input"`
+				Output    int `json:"output"`
+				Reasoning int `json:"reasoning"`
+				Cache     struct {
+					Read  int `json:"read"`
+					Write int `json:"write"`
+				} `json:"cache"`
+			} `json:"tokens"`
 			State struct {
 				Status string `json:"status"`
 				Title  string `json:"title"`
@@ -220,6 +229,20 @@ func handleOpencodeLine(line []byte, r *Reply, onEvent func(Event)) {
 	case "step_finish":
 		r.Turns++ // a model step, not a user turn — closest available count
 		r.CostUSD += ev.Part.Cost
+		// Live shape 2026-07-20 (opencode-ai 1.17.x): part.tokens{input, output,
+		// reasoning, cache{read,write}} + part.cost in real USD. Reasoning folds
+		// into OutputTokens (it is billed output). Accumulated across steps.
+		tk := ev.Part.Tokens
+		if tk.Input+tk.Output+tk.Reasoning+tk.Cache.Read+tk.Cache.Write > 0 || ev.Part.Cost > 0 {
+			r.Usage = addUsage(r.Usage, &Usage{
+				InputTokens:      tk.Input,
+				OutputTokens:     tk.Output + tk.Reasoning,
+				CacheReadTokens:  tk.Cache.Read,
+				CacheWriteTokens: tk.Cache.Write,
+				CostUSD:          ev.Part.Cost,
+				CostSource:       CostReal,
+			})
+		}
 	case "error":
 		if ev.Message != "" {
 			r.Err = ev.Message

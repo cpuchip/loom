@@ -99,6 +99,8 @@ type sessFlags struct {
 	mcpConfig, allowedTools, permMode        *string
 	sysPromptFile, claudeHome, skills        *string
 	connect, token, session, peer            *string
+	outputSchema                             *string
+	budget                                   *float64
 	events, isolate, skipPerms, json         *bool
 	consult                                  *bool
 }
@@ -124,8 +126,19 @@ func addSessionFlags(fs *flag.FlagSet) *sessFlags {
 		token:         fs.String("token", "", "auth token for --connect"),
 		peer:          fs.String("peer", "", "(--connect wss://) the pinned peer name you paired with (loom pair)"),
 		session:       fs.String("session", "", "(--connect) reattach a warm resident by this stable NAME — a second use reuses the live process, no respawn/cold-read"),
+		outputSchema:  fs.String("output-schema", "", "JSON-Schema-subset file the FINAL answer must match: the schema is appended to the prompt, the reply's JSON is validated, one re-prompt on failure, non-zero exit if still invalid; with --json the parsed object rides the Reply's `parsed` field"),
+		budget:        fs.Float64("budget", 0, "spend ceiling for the command's turns: USD for cost-reporting backends (claude, opencode), TOKENS otherwise (codex, copilot, local) — further turns are refused once exceeded; 0 = no budget"),
 		json:          fs.Bool("json", false, "emit the Reply as JSON to stdout (for programmatic/subprocess callers)"),
 	}
+}
+
+// loadSchema parses --output-schema at command start, so a bad schema file fails
+// FAST — before any agent spawns or money moves. nil when the flag is unset.
+func (sf *sessFlags) loadSchema() (*loom.Schema, error) {
+	if *sf.outputSchema == "" {
+		return nil, nil
+	}
+	return loom.ParseSchemaFile(*sf.outputSchema)
 }
 
 func addCloneFlag(fs *flag.FlagSet, sf *sessFlags) {
@@ -251,6 +264,14 @@ func cmdRun(args []string) error {
 	if prompt == "" {
 		return fmt.Errorf("run: need a prompt")
 	}
+	schema, err := sf.loadSchema()
+	if err != nil {
+		return err // fail fast: a bad schema file must never spawn (and bill) a worker
+	}
+	if schema != nil {
+		prompt += loom.SchemaPromptSuffix(schema)
+	}
+	budget := loom.NewBudget(*sf.budget)
 	if err := sf.resolveClone(os.Stderr); err != nil {
 		return err
 	}
@@ -293,6 +314,17 @@ func cmdRun(args []string) error {
 	if runErr != nil {
 		return runErr
 	}
+	budget.Note(reply)
+	if schema != nil {
+		// Validate the final answer; one re-prompt on failure (budget-gated).
+		// A still-invalid answer exits non-zero — but the reply is emitted
+		// first, so the caller can see WHAT failed validation.
+		reply, runErr = loom.EnforceSchema(context.Background(), sess, schema, reply, budget, teeEvents(*sf.events, recEvent))
+		if runErr != nil {
+			_ = emitReply(reply, *sf.json)
+			return runErr
+		}
+	}
 	if err := emitReply(reply, *sf.json); err != nil {
 		return err
 	}
@@ -332,6 +364,7 @@ func cmdChat(args []string) error {
 		return err
 	}
 	defer sess.Close()
+	budget := loom.NewBudget(*sf.budget)
 	fmt.Fprintf(os.Stderr, "loom chat — %s — one message per line, Ctrl-D to end\n", *sf.agent)
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 1<<20), 16<<20)
@@ -340,10 +373,16 @@ func cmdChat(args []string) error {
 		if line == "" {
 			continue
 		}
+		// The budget refuses FURTHER turns — the turn that crossed the ceiling
+		// completed; the next line is where the refusal lands.
+		if budget.Exceeded() {
+			return fmt.Errorf("chat: budget exceeded (%s) — refusing further turns", budget)
+		}
 		r, err := sendTurn(sess, line, *sf.events)
 		if err != nil {
 			return err
 		}
+		budget.Note(r)
 		if err := emitReply(r, *sf.json); err != nil {
 			return err
 		}
@@ -373,6 +412,19 @@ func cmdSend(args []string) error {
 	if *sf.session == "" {
 		return fmt.Errorf("send: --session <name> is required (the warm resident to reattach)")
 	}
+	schema, err := sf.loadSchema()
+	if err != nil {
+		return err
+	}
+	if schema != nil && *detach {
+		// a detached turn's reply is fetched later by `loom await` — there is no
+		// session at hand to validate against and re-prompt on
+		return fmt.Errorf("send: --output-schema cannot be combined with --detach")
+	}
+	if schema != nil {
+		prompt += loom.SchemaPromptSuffix(schema)
+	}
+	budget := loom.NewBudget(*sf.budget)
 	b, err := chooseBackend(sf)
 	if err != nil {
 		return err
@@ -401,6 +453,14 @@ func cmdSend(args []string) error {
 	r, err := sendTurn(sess, prompt, *sf.events)
 	if err != nil {
 		return err
+	}
+	budget.Note(r)
+	if schema != nil {
+		r, err = loom.EnforceSchema(context.Background(), sess, schema, r, budget, teeEvents(*sf.events, nil))
+		if err != nil {
+			_ = emitReply(r, *sf.json)
+			return err
+		}
 	}
 	return emitReply(r, *sf.json)
 }
@@ -763,6 +823,7 @@ func cmdDuo(args []string) error {
 		WorkerOpts: workerOpts, CriticOpts: criticOpts,
 		Task: task, Rounds: *rounds,
 		Observer: duoObserverCLI(*sf.events, *sf.json),
+		Budget:   loom.NewBudget(*sf.budget),
 	})
 	if err != nil {
 		return err
@@ -1170,14 +1231,24 @@ func sendTurnTee(sess loom.Session, prompt string, showEvents bool, extra func(l
 		}()
 		defer func() { signal.Stop(sigCh); close(done) }()
 	}
-	if !showEvents && extra == nil {
+	cb := teeEvents(showEvents, extra)
+	if cb == nil {
 		return sess.Send(context.Background(), prompt)
+	}
+	return sess.SendStream(context.Background(), prompt, cb)
+}
+
+// teeEvents combines the stderr event printer (--events) with an extra sink (the
+// run recorder). nil when neither is wanted — the caller takes the plain Send path.
+func teeEvents(showEvents bool, extra func(loom.Event)) func(loom.Event) {
+	if !showEvents && extra == nil {
+		return nil
 	}
 	var printer func(loom.Event)
 	if showEvents {
 		printer = eventPrinter()
 	}
-	cb := func(ev loom.Event) {
+	return func(ev loom.Event) {
 		if extra != nil {
 			extra(ev)
 		}
@@ -1185,7 +1256,6 @@ func sendTurnTee(sess loom.Session, prompt string, showEvents bool, extra func(l
 			printer(ev)
 		}
 	}
-	return sess.SendStream(context.Background(), prompt, cb)
 }
 
 func eventPrinter() func(loom.Event) {

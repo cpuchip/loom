@@ -135,6 +135,7 @@ func (s *claudeSession) SendStream(ctx context.Context, prompt string, onEvent f
 			}
 			s.sessionID = r.SessionID
 			s.ioMu.Unlock()
+			r.Usage = parseClaudeUsage(ev, r.CostUSD)
 			emit(onEvent, Event{Kind: EvResult, Backend: "claude", Text: r.Text})
 			return r, nil
 		}
@@ -180,6 +181,33 @@ func (s *claudeSession) Interrupt() error {
 	line, _ := json.Marshal(msg)
 	_, err := fmt.Fprintf(s.stdin, "%s\n", line)
 	return err
+}
+
+// parseClaudeUsage normalizes a result event's usage block. It is PER TURN
+// (verified live 2026-07-20, Claude Code v2.1.x: usage{input_tokens,
+// cache_creation_input_tokens, cache_read_input_tokens, output_tokens}, where
+// input_tokens already EXCLUDES cache reads); cost is the per-turn delta the
+// caller computed from the cumulative total_cost_usd. nil when the event has no
+// usage block (older CLIs) — absent, never zero-as-fact.
+func parseClaudeUsage(ev map[string]any, costDelta float64) *Usage {
+	u, ok := ev["usage"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	return &Usage{
+		InputTokens:      intField(u, "input_tokens"),
+		OutputTokens:     intField(u, "output_tokens"),
+		CacheReadTokens:  intField(u, "cache_read_input_tokens"),
+		CacheWriteTokens: intField(u, "cache_creation_input_tokens"),
+		CostUSD:          costDelta,
+		CostSource:       CostReal,
+	}
+}
+
+// intField reads a numeric member of a decoded-JSON map as an int (0 if absent).
+func intField(m map[string]any, key string) int {
+	f, _ := m[key].(float64)
+	return int(f)
 }
 
 // emitClaudeContent walks a claude message event's content blocks → typed events.

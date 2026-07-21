@@ -152,12 +152,16 @@ func handleCopilotLine(line []byte, r *Reply, onEvent func(Event)) {
 		Type      string `json:"type"`
 		SessionID string `json:"sessionId"`
 		ExitCode  *int   `json:"exitCode"`
-		Data      struct {
-			Content   string `json:"content"`
-			Message   string `json:"message"`
-			ToolName  string `json:"toolName"`
-			Success   *bool  `json:"success"`
-			Arguments struct {
+		Usage     struct {
+			PremiumRequests int `json:"premiumRequests"`
+		} `json:"usage"`
+		Data struct {
+			Content      string `json:"content"`
+			Message      string `json:"message"`
+			ToolName     string `json:"toolName"`
+			Success      *bool  `json:"success"`
+			OutputTokens int    `json:"outputTokens"`
+			Arguments    struct {
 				Command string `json:"command"`
 			} `json:"arguments"`
 			Result struct {
@@ -174,6 +178,12 @@ func handleCopilotLine(line []byte, r *Reply, onEvent func(Event)) {
 			r.Text = ev.Data.Content // the LAST assistant message is the turn's answer
 			emit(onEvent, Event{Kind: EvAssistant, Backend: "copilot", Text: ev.Data.Content})
 		}
+		// Each assistant.message carries its own outputTokens (live shape
+		// 2026-07-20, copilot 1.0.69) — the ONLY token signal copilot emits;
+		// its result.usage has premiumRequests + durations, no token counts.
+		if ev.Data.OutputTokens > 0 {
+			r.Usage = addUsage(r.Usage, &Usage{OutputTokens: ev.Data.OutputTokens, CostSource: CostNone})
+		}
 	case "assistant.reasoning":
 		if ev.Data.Content != "" {
 			emit(onEvent, Event{Kind: EvThinking, Backend: "copilot", Text: ev.Data.Content})
@@ -187,6 +197,9 @@ func handleCopilotLine(line []byte, r *Reply, onEvent func(Event)) {
 		r.Turns++
 	case "result":
 		r.SessionID = ev.SessionID
+		if ev.Usage.PremiumRequests > 0 {
+			r.Usage = addUsage(r.Usage, &Usage{PremiumRequests: ev.Usage.PremiumRequests, CostSource: CostNone})
+		}
 		if ev.ExitCode != nil && *ev.ExitCode != 0 && r.Err == "" {
 			r.Err = fmt.Sprintf("copilot exited %d", *ev.ExitCode)
 		}

@@ -199,6 +199,7 @@ func (r *runRecorder) finish(runErr error, rep loom.Reply) {
 	r.man.CostUSD = rep.CostUSD
 	r.man.Turns = rep.Turns
 	r.man.SessionID = rep.SessionID
+	r.man.Usage = rep.Usage
 	id := r.man.RunID
 	r.mu.Unlock()
 

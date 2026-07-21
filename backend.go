@@ -5,16 +5,26 @@
 // harnesses at once; loom holds many agent CLIs and weaves their work together.
 package loom
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Reply is the result of one user turn.
 type Reply struct {
 	Backend   string  `json:"backend"`
 	Text      string  `json:"text"`
 	SessionID string  `json:"session_id,omitempty"`
-	CostUSD   float64 `json:"cost_usd,omitempty"` // cost of THIS turn (delta), best-effort
+	CostUSD   float64 `json:"cost_usd,omitempty"` // cost of THIS turn (delta), best-effort (kept beside Usage for wire compat)
 	Turns     int     `json:"turns,omitempty"`
 	Err       string  `json:"error,omitempty"`
+	// Usage is the turn's normalized resource accounting — what this backend
+	// honestly reports (tokens and/or USD; see usage.go's fidelity table). nil
+	// when the backend reports nothing machine-readable.
+	Usage *Usage `json:"usage,omitempty"`
+	// Parsed is the schema-validated JSON extracted from Text when the caller
+	// ran with --output-schema (see schema.go). nil otherwise.
+	Parsed json.RawMessage `json:"parsed,omitempty"`
 }
 
 // SessionOpts configure a session.

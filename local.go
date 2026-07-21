@@ -75,6 +75,10 @@ type oaiResp struct {
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error"`
@@ -152,7 +156,14 @@ func (s *localSession) SendStream(ctx context.Context, prompt string, onEvent fu
 	// commit BOTH turns only now that the turn has succeeded
 	s.history = append(msgs, oaiMsg{Role: "assistant", Content: text})
 	emit(onEvent, Event{Kind: EvResult, Backend: "local", Text: text})
-	return Reply{Backend: "local", Text: text, SessionID: "local:" + model, Turns: 1, CostUSD: 0}, nil
+	// standard OpenAI usage block, when the server sends one (llama-server, LM
+	// Studio, vLLM all do). Tokens only — a local model's dollar cost is zero in
+	// practice but not the API's to claim, so CostSource stays "none".
+	var usage *Usage
+	if r.Usage.PromptTokens+r.Usage.CompletionTokens > 0 {
+		usage = &Usage{InputTokens: r.Usage.PromptTokens, OutputTokens: r.Usage.CompletionTokens, CostSource: CostNone}
+	}
+	return Reply{Backend: "local", Text: text, SessionID: "local:" + model, Turns: 1, CostUSD: 0, Usage: usage}, nil
 }
 
 func (s *localSession) SessionID() string {

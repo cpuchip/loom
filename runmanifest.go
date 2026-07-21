@@ -40,6 +40,11 @@ type RunManifest struct {
 	CostUSD     float64    `json:"cost_usd,omitempty"`
 	Turns       int        `json:"turns,omitempty"`
 	SessionID   string     `json:"session_id,omitempty"`
+	// Usage is the run's normalized accounting (tokens and/or USD with a
+	// cost-source marker — see usage.go). Absent while the run is open, and on
+	// manifests written before this field existed; readers treat nil as
+	// "unreported", never zero-cost-as-fact.
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // DoneSentinel is the tiny JSON written to the `done` file on a graceful exit.
