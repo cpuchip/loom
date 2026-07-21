@@ -28,6 +28,7 @@ type warmStub struct {
 	mu         sync.Mutex
 	opens      int
 	lastResume string
+	lastOpts   SessionOpts
 	made       []*warmStubSession
 	failOnCall int // >0: every session errors on that SendStream call number
 }
@@ -39,13 +40,15 @@ func (b *warmStub) Open(_ context.Context, opts SessionOpts) (Session, error) {
 	defer b.mu.Unlock()
 	b.opens++
 	b.lastResume = opts.Resume
+	b.lastOpts = opts
 	s := &warmStubSession{id: fmt.Sprintf("warm-%d", b.opens), failOnCall: b.failOnCall}
 	b.made = append(b.made, s)
 	return s, nil
 }
 
-func (b *warmStub) openCount() int         { b.mu.Lock(); defer b.mu.Unlock(); return b.opens }
-func (b *warmStub) lastResumeSeen() string { b.mu.Lock(); defer b.mu.Unlock(); return b.lastResume }
+func (b *warmStub) openCount() int          { b.mu.Lock(); defer b.mu.Unlock(); return b.opens }
+func (b *warmStub) lastResumeSeen() string  { b.mu.Lock(); defer b.mu.Unlock(); return b.lastResume }
+func (b *warmStub) openedOpts() SessionOpts { b.mu.Lock(); defer b.mu.Unlock(); return b.lastOpts }
 func (b *warmStub) sess(i int) *warmStubSession {
 	b.mu.Lock()
 	defer b.mu.Unlock()

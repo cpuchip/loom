@@ -6,7 +6,10 @@ package loom
 // then ANY model alias (critic, review, or eventually all of them) can resolve
 // to a harness-driven model — e.g. Claude sonnet via a Max subscription —
 // instead of a paid per-token API. The request drives a fresh one-shot backend
-// session (default agent claude) and returns its reply in OpenAI shape.
+// session and returns its reply in OpenAI shape. The MODEL NAME selects the
+// backend (see shimBackendFor): claude-family names (the default) run claude,
+// gpt*/codex*/sol/terra/luna run codex, copilot-* runs copilot, and
+// "<backend>:<model>" pins explicitly.
 //
 // Statelessness: a chat-completions call carries its whole history each time
 // (the caller composes it). We flatten those messages into ONE prompt for a
@@ -42,11 +45,12 @@ var openaiHomeRoot string
 // openaiMCPConfig, if set via `loom serve --openai-mcp-config`, is the
 // --mcp-config JSON handed to every shim-spawned session — the hinge back into
 // pg-ai-stewards (doc_*, doc_search, …). Without it a shim critic is a plain
-// Claude Code with no substrate tools, so a doc-construction critique/finalize
-// stage cannot read or pool the draft. NOTE: an isolated session runs in a Linux
-// container, so the config's server must be reachable FROM the container (a
-// container-baked binary or an http endpoint via host.docker.internal), and any
-// DSN must resolve there too.
+// agent with no substrate tools, so a doc-construction critique/finalize
+// stage cannot read or pool the draft. NOTE: a claude-routed session runs in a
+// Linux container, so the config's server must be reachable FROM the container
+// (a container-baked binary or an http endpoint via host.docker.internal), and
+// any DSN must resolve there too. A codex/copilot/opencode-routed session runs
+// on the HOST and resolves the config there instead (see hostMCPConfig).
 var openaiMCPConfig string
 
 // openaiTimeout caps one shim completion end-to-end (session spawn → reply).
@@ -104,6 +108,82 @@ func resolveModelHome(model string) (bareModel, home, workdir string) {
 		return base, h, ""
 	}
 	return base, h, w
+}
+
+// shimBackendFor maps the shim's BARE model name (role already split off by
+// resolveModelHome) to the backend that serves it, plus the model string that
+// backend receives. Historically the shim was hardwired to claude — every
+// /v1/* request became `claude --model <name>` no matter what the caller asked
+// for — so "gpt-5.6-terra#capcom" ran a broken claude turn instead of a codex
+// seat. This is the same select-a-backend step `loom run --agent` and the ws
+// open frame already perform; the shim derives it from the model name because
+// an OpenAI caller has no other selector.
+//
+// Rules, first match wins:
+//
+//  1. "<backend>:<model>" pins explicitly ("codex:gpt-5.6-terra",
+//     "opencode:zen/glm-5.2", "claude:sonnet") — the escape hatch when a name
+//     shape lies. Only shim-supported backends (claude/codex/copilot/opencode)
+//     are recognized; agy is structurally limited (no stream-json) and local
+//     needs its own model plumbing, so neither is routable here.
+//  2. A bare backend name ("codex", "copilot", "opencode") runs that backend's
+//     own default model.
+//  3. "copilot-<model>" peels the prefix → copilot ("copilot-gpt-5" → gpt-5).
+//  4. OpenAI-shaped names (gpt*, codex*) and the codex fleet nicknames
+//     (sol/terra/luna) → codex, model passed through UNCHANGED — codex owns
+//     resolution, so a nickname its catalog doesn't know errors clearly
+//     instead of silently drifting to another model.
+//  5. Everything else (sonnet, opus, haiku, claude-*, unknown, empty) keeps
+//     the historical claude path byte-identical: default backend, model
+//     passed through untouched.
+//
+// A "#role" suffix that survived resolveModelHome (a serve with no
+// --openai-home-root) selects nothing on a non-claude backend — it is stripped
+// from both the match and the model those backends receive. The claude
+// fallthrough returns the ORIGINAL string untouched (legacy shape).
+func shimBackendFor(model string) (agent, bareModel string) {
+	head, _, _ := strings.Cut(model, "#")
+	lower := strings.ToLower(head)
+	if pre, rest, found := strings.Cut(head, ":"); found {
+		switch p := strings.ToLower(pre); p {
+		case "claude", "codex", "copilot", "opencode":
+			return p, rest
+		}
+	}
+	switch {
+	case lower == "codex" || lower == "copilot" || lower == "opencode":
+		return lower, ""
+	case strings.HasPrefix(lower, "copilot-"):
+		return "copilot", head[len("copilot-"):]
+	case strings.HasPrefix(lower, "gpt") || strings.HasPrefix(lower, "codex") ||
+		lower == "sol" || lower == "terra" || lower == "luna":
+		return "codex", head
+	}
+	return "claude", model
+}
+
+// hostMCPConfig resolves the shim's --mcp-config for a backend that runs ON THE
+// HOST (codex, copilot, opencode — no docker container, no /home/node). The
+// mirror of effectiveMCPConfig: a container-anchored path
+// (/home/node/.claude/<file>) names a file that physically lives in the role
+// home's HOST directory, so map it there when it exists — else drop the hinge
+// (toolless, never a crashed turn). A non-anchored path is already a host path
+// and passes through untouched. NOTE the mapped file's CONTENT is the operator's
+// contract: a config written for in-container consumption (container-baked
+// binary paths, host.docker.internal URLs) may not resolve from the host.
+func hostMCPConfig(cfg, home string) string {
+	base, anchored := strings.CutPrefix(cfg, "/home/node/.claude/")
+	if !anchored {
+		return cfg // empty, or a host path already — pass through
+	}
+	if home == "" {
+		return ""
+	}
+	p := filepath.Join(home, filepath.FromSlash(base))
+	if _, err := os.Stat(p); err != nil {
+		return ""
+	}
+	return p
 }
 
 // openaiChatReq is the subset of the OpenAI request body we honor.
@@ -235,7 +315,14 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent := "claude"
+	// Role-aware environment: "sonnet#critic" -> sonnet + the critic home
+	// (+ the critic workdir mounted ro as /work, if <root>/critic-workdir exists).
+	bareModel, home, workdir := resolveModelHome(req.Model)
+
+	// Model → backend: "gpt-5.6-terra#capcom" runs a codex seat, "copilot-gpt-5"
+	// a copilot one; claude-family names keep the historical claude path
+	// byte-identical (see shimBackendFor).
+	agent, routedModel := shimBackendFor(bareModel)
 	be, ok := s.backends[agent]
 	if !ok {
 		writeOpenAIErr(w, req.Stream, fmt.Errorf("no %q backend on this loom serve", agent))
@@ -245,15 +332,18 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), openaiTimeout)
 	defer cancel()
 
-	// Role-aware environment: "sonnet#critic" -> sonnet + the critic home
-	// (+ the critic workdir mounted ro as /work, if <root>/critic-workdir exists).
-	bareModel, home, workdir := resolveModelHome(req.Model)
-
 	// #333: a substrate dispatch declares its session in the standard `user`
 	// field — derive a per-session MCP config carrying it as a header, so the
 	// session's doc drafts scope to the work item. Fallback = static config.
+	// The wi-- derivation is CLAUDE-ONLY for now: it maps paths in and out of
+	// the claude container, and the substrate's doc-construction seats are
+	// claude seats; a non-claude wi-- dispatch runs on the static config and
+	// merely loses the provenance header, never the request.
 	mcpCfg := effectiveMCPConfig(openaiMCPConfig, home)
-	if strings.HasPrefix(req.User, "wi--") {
+	if agent != "claude" {
+		mcpCfg = hostMCPConfig(openaiMCPConfig, home)
+	}
+	if agent == "claude" && strings.HasPrefix(req.User, "wi--") {
 		if derived, host := sessionMCPConfig(home, openaiMCPConfig, req.User); derived != "" {
 			mcpCfg = derived
 			defer os.Remove(host)
@@ -263,14 +353,22 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	// baseOpts is the per-turn session shape; only Resume varies (cold path) or is
 	// unused (warm path — the live process IS the continuation, no --resume).
 	baseOpts := SessionOpts{
-		Model:           bareModel, // loom passes --model straight through
-		Isolate:         true,      // clean sandbox per turn; no host-config bleed
-		SkipPermissions: true,
-		ClaudeHome:      home,
-		Workdir:         workdir, // role context ("" = serve's own cwd, the historical default)
-		WorkdirRO:       workdir != "",
-		MCPConfig:       mcpCfg, // hinge into pg-ai-stewards (doc_* etc.), if configured
+		Model:     routedModel, // loom passes --model straight through
+		Isolate:   true,        // claude: docker sandbox; codex/copilot: their NATIVE wall (workspace-write / allow-all-tools+path-verification)
+		Workdir:   workdir,     // role context ("" = serve's own cwd, the historical default)
+		MCPConfig: mcpCfg,      // hinge into pg-ai-stewards (doc_* etc.), if configured
 	}
+	if agent == "claude" {
+		// The historical shape, unchanged: skip-permissions is safe INSIDE the
+		// docker wall, and the role home mounts as the container's ~/.claude.
+		baseOpts.SkipPermissions = true
+		baseOpts.ClaudeHome = home
+		baseOpts.WorkdirRO = workdir != ""
+	}
+	// Non-claude backends run on the HOST: SkipPermissions is deliberately NOT
+	// set (it would strip the only wall — codex --dangerously-bypass…, copilot
+	// --allow-all), ClaudeHome/WorkdirRO are container concepts they ignore, and
+	// the role workdir is a host path they can cd into directly.
 	open := func(resume string) (Session, error) {
 		o := baseOpts
 		o.Resume = resume // sticky cold path: continue the living session by id
@@ -278,11 +376,14 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Sticky conversations (user = "sticky:<name>", see openai_sticky.go): one
-	// living claude session per (model,user). Cold path — the container is
-	// per-turn, session state persists in the mounted role home, --resume carries
-	// the lineage. Warm path (--openai-warm) — the process/container is kept ALIVE
-	// between turns, so the next turn feeds straight in, skipping the spawn+--resume
-	// floor. Everything non-sticky keeps the historical fresh-per-turn semantics.
+	// living session per (model,user). Cold path — the process is per-turn,
+	// session state persists in the backend's own store (claude: the mounted
+	// role home; codex/copilot/opencode: their native session stores), and
+	// Resume carries the lineage — so sticky works across ALL routed backends.
+	// Warm path (--openai-warm) — CLAUDE-ONLY: it exists to skip claude's
+	// spawn+--resume floor; the per-turn backends spawn per turn regardless, so
+	// a warm seat would hold nothing but a struct while stickyOverview reported
+	// a live claude process that isn't there.
 	var entry *stickyEntry
 	resume := ""
 	useWarm := false
@@ -291,7 +392,7 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 		entry.mu.Lock() // serialize turns within one conversation (held across the turn)
 		defer entry.mu.Unlock()
 		resume = entry.sessionID
-		useWarm = openaiWarm && entry.canServeWarm()
+		useWarm = openaiWarm && agent == "claude" && entry.canServeWarm()
 	}
 	// The session already holds prior context when we have a lineage to resume OR a
 	// live warm seat; only then does the delta (messages after the last assistant)

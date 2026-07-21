@@ -11,7 +11,7 @@ import (
 // the sandbox via -c. Both end with the `-` stdin-prompt sentinel.
 func TestCodexArgs(t *testing.T) {
 	t.Run("initial turn", func(t *testing.T) {
-		a := codexArgs(SessionOpts{Workdir: "/w", Model: "gpt-5.3-codex"}, "")
+		a := codexArgs(SessionOpts{Workdir: "/w", Model: "gpt-5.3-codex"}, "", nil)
 		for _, must := range []string{"exec", "--json", "--skip-git-repo-check", "-m", "gpt-5.3-codex", "-C", "/w"} {
 			if !slices.Contains(a, must) {
 				t.Errorf("initial args missing %q: %v", must, a)
@@ -25,7 +25,7 @@ func TestCodexArgs(t *testing.T) {
 		}
 	})
 	t.Run("resumed turn: narrower flags, no -C/-s", func(t *testing.T) {
-		a := codexArgs(SessionOpts{Workdir: "/w", Isolate: true}, "thread-123")
+		a := codexArgs(SessionOpts{Workdir: "/w", Isolate: true}, "thread-123", nil)
 		if a[0] != "exec" || a[1] != "resume" || a[2] != "thread-123" {
 			t.Errorf("resume argv prefix wrong: %v", a)
 		}
@@ -37,19 +37,32 @@ func TestCodexArgs(t *testing.T) {
 		}
 	})
 	t.Run("trust ladder", func(t *testing.T) {
-		if a := codexArgs(SessionOpts{SkipPermissions: true, Consult: true, Isolate: true}, ""); !slices.Contains(a, "--dangerously-bypass-approvals-and-sandbox") {
+		if a := codexArgs(SessionOpts{SkipPermissions: true, Consult: true, Isolate: true}, "", nil); !slices.Contains(a, "--dangerously-bypass-approvals-and-sandbox") {
 			t.Errorf("SkipPermissions outranks the ladder: %v", a)
 		} else if slices.Contains(a, "-s") {
 			t.Errorf("bypass must not also set a sandbox: %v", a)
 		}
-		if a := codexArgs(SessionOpts{Consult: true, Isolate: true}, ""); !slices.Contains(a, "read-only") {
+		if a := codexArgs(SessionOpts{Consult: true, Isolate: true}, "", nil); !slices.Contains(a, "read-only") {
 			t.Errorf("Consult means read-only enforcement, even with Isolate set: %v", a)
 		}
-		if a := codexArgs(SessionOpts{Isolate: true}, ""); !slices.Contains(a, "workspace-write") {
+		if a := codexArgs(SessionOpts{Isolate: true}, "", nil); !slices.Contains(a, "workspace-write") {
 			t.Errorf("Isolate maps to the native workspace-write wall: %v", a)
 		}
-		if a := codexArgs(SessionOpts{}, ""); slices.Contains(a, "-s") {
+		if a := codexArgs(SessionOpts{}, "", nil); slices.Contains(a, "-s") {
 			t.Errorf("no opts → codex's own default sandbox, no -s: %v", a)
+		}
+	})
+	t.Run("mcp overrides ride every turn, before the stdin sentinel", func(t *testing.T) {
+		mcp := []string{"-c", `mcp_servers.probe.command="probe-mcp"`}
+		for _, resume := range []string{"", "thread-123"} {
+			a := codexArgs(SessionOpts{Isolate: true}, resume, mcp)
+			i := slices.Index(a, `mcp_servers.probe.command="probe-mcp"`)
+			if i < 0 || a[i-1] != "-c" {
+				t.Errorf("resume=%q: mcp -c override missing/malformed: %v", resume, a)
+			}
+			if a[len(a)-1] != "-" {
+				t.Errorf("resume=%q: prompt sentinel must stay last: %v", resume, a)
+			}
 		}
 	})
 }
