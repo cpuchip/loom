@@ -35,13 +35,15 @@ import (
 //	Isolate         → sandbox workspace-write                     (edits walled to the workdir)
 //	(none)          → codex's own config default
 //
-// MCPConfig IS honored (local sessions): the claude-format JSON is translated at
-// Open into per-invocation `-c mcp_servers.<name>.<key>=…` config overrides (see
-// mcpbridge.go) — codex's native MCP surface, without touching the user's
-// ~/.codex/config.toml. A REMOTE session still ignores it: the config file is a
-// local path, and the remote transport joins argv through `bash -lc` unquoted,
-// which would mangle the TOML values — wire the remote box's own config.toml
-// instead. Claude-specific opts with no codex analog (AllowedTools,
+// MCPConfig IS honored, local AND remote: the claude-format JSON is read on
+// THIS box (the local file is the source of truth) and translated at Open into
+// per-invocation `-c mcp_servers.<name>.<key>=…` config overrides (see
+// mcpbridge.go) — codex's native MCP surface, without touching the target's
+// ~/.codex/config.toml. The remote transport quotes every argv element (see
+// codexCmd), so the TOML values that `bash -lc` word-splitting used to mangle
+// now arrive intact. NOTE: the override's server COMMANDS/URLS must resolve on
+// whichever box codex runs — a remote seat needs the MCP binary/endpoint
+// reachable THERE. Claude-specific opts with no codex analog (AllowedTools,
 // PermissionMode, ClaudeHome, Image) remain ignored. SystemPromptFile is
 // approximated by prepending the file's contents to the first prompt (codex has
 // no append-system-prompt flag).
@@ -60,7 +62,10 @@ func (b CodexBackend) Open(ctx context.Context, opts SessionOpts) (Session, erro
 		return nil, fmt.Errorf("codex: %w", err)
 	}
 	var mcpArgs []string
-	if opts.MCPConfig != "" && opts.Remote == "" {
+	if opts.MCPConfig != "" {
+		// Local AND remote: the config file is read HERE (the local file is the
+		// source of truth) and travels as `-c` overrides — which the remote
+		// transport now carries intact (codexCmd quotes every argv element).
 		var err error
 		if mcpArgs, err = codexMCPArgs(opts.MCPConfig); err != nil {
 			// Fail at Open, like claude's own startup exit on a bad --mcp-config —
@@ -315,12 +320,22 @@ func sandboxArgs(initial bool, mode string) []string {
 //	direct → codex exec …                                    (cwd = Workdir)
 //	remote → ssh -T <host> bash -lc 'cd <dir> && codex exec …'  (the REMOTE box's codex)
 //
-// The prompt flows over stdin through either transport unchanged.
+// The prompt flows over stdin through either transport unchanged. The remote
+// form quotes EVERY argv element (the onehotCmd rule): the old raw space-join
+// let the remote bash word-split and eat quotes inside values — which is
+// exactly what mangled `-c mcp_servers.….args=["…"]` TOML overrides and
+// `-c sandbox_mode="read-only"` — so per-element quoting is what makes remote
+// MCP (and exact sandbox values) carriable at all.
 func codexCmd(ctx context.Context, bin string, opts SessionOpts, args []string) *exec.Cmd {
 	if opts.Remote != "" {
-		inner := strings.Join(append([]string{bin}, args...), " ")
+		parts := make([]string, 0, len(args)+1)
+		parts = append(parts, bin)
+		for _, a := range args {
+			parts = append(parts, shellQuote(a))
+		}
+		inner := strings.Join(parts, " ")
 		if opts.Workdir != "" {
-			inner = "cd " + opts.Workdir + " && " + inner
+			inner = "cd " + shellQuote(opts.Workdir) + " && " + inner
 		}
 		// login shell for the remote's full PATH (nvm / npm-global / volta installs).
 		return exec.CommandContext(ctx, "ssh", "-T", opts.Remote, "bash", "-lc", shellQuote(inner))

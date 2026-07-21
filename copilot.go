@@ -98,7 +98,19 @@ func (s *copilotSession) SendStream(ctx context.Context, prompt string, onEvent 
 	s.interrupted = false
 	s.mu.Unlock()
 
-	cmd := onehotCmd(ctx, resolveCopilotBin(s.bin), s.opts, copilotArgs(s.opts, resume, prompt))
+	// Remote MCP: --additional-mcp-config takes @<path>, resolved where copilot
+	// runs. When the local config file exists it is the source of truth — plant
+	// it on the target (remotemcp.go) and point the flag there; a path with no
+	// local file keeps the legacy remote-path contract.
+	prelude := ""
+	args := copilotArgs(s.opts, resume, prompt)
+	if s.opts.Remote != "" {
+		if pre, remotePath, ok := remoteMCPFromFile(s.opts.MCPConfig); ok {
+			prelude = pre
+			args = replaceFlagValue(args, "--additional-mcp-config", "@"+remotePath)
+		}
+	}
+	cmd := onehotCmd(ctx, resolveCopilotBin(s.bin), s.opts, args, prelude)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return Reply{Backend: "copilot", Err: err.Error()}, err

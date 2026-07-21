@@ -9,8 +9,9 @@ import (
 )
 
 // The shim's role environment: "<model>#<role>" resolves the role claude-home
-// and, when present, the sibling <role>-workdir (mounted ro as /work — the
-// seat's grounding context). A missing dir degrades, never fails.
+// and the sibling <role>-workdir (mounted ro as /work — the seat's grounding
+// context) INDEPENDENTLY — a host-run codex seat has a workdir with no claude
+// home. A missing dir degrades, never fails.
 func TestResolveModelHomeRoleWorkdir(t *testing.T) {
 	root := t.TempDir()
 	defHome := filepath.Join(root, "default-home")
@@ -19,6 +20,7 @@ func TestResolveModelHomeRoleWorkdir(t *testing.T) {
 		filepath.Join(root, "wargame-claude-home"),
 		filepath.Join(root, "wargame-workdir"),
 		filepath.Join(root, "critic-claude-home"), // home but NO workdir
+		filepath.Join(root, "capcom-workdir"),     // workdir but NO home (a codex seat)
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -33,10 +35,11 @@ func TestResolveModelHomeRoleWorkdir(t *testing.T) {
 		wantModel, wantHomeTail string
 		wantWorkdir             bool
 	}{
-		{"sonnet#wargame", "sonnet", "wargame-claude-home", true}, // home + workdir
-		{"sonnet#critic", "sonnet", "critic-claude-home", false},  // home only
-		{"sonnet#nosuchrole", "sonnet", "default-home", false},    // no home → default, no workdir
-		{"sonnet", "sonnet", "default-home", false},               // bare model
+		{"sonnet#wargame", "sonnet", "wargame-claude-home", true},       // home + workdir
+		{"sonnet#critic", "sonnet", "critic-claude-home", false},        // home only
+		{"sonnet#nosuchrole", "sonnet", "default-home", false},          // no dirs → default, no workdir
+		{"sonnet", "sonnet", "default-home", false},                     // bare model
+		{"gpt-5.6-terra#capcom", "gpt-5.6-terra", "default-home", true}, // workdir WITHOUT a claude home
 	}
 	for _, tc := range tests {
 		gotModel, gotHome, gotWorkdir := resolveModelHome(tc.model)
@@ -49,6 +52,32 @@ func TestResolveModelHomeRoleWorkdir(t *testing.T) {
 		if (gotWorkdir != "") != tc.wantWorkdir {
 			t.Errorf("%s: workdir = %q, want present=%v", tc.model, gotWorkdir, tc.wantWorkdir)
 		}
+	}
+}
+
+// Serve-side skills: <root>/<role>-skills resolves for "#role" models; every
+// config gap (no role, no root, missing dir) yields "" — degrade, never fail.
+func TestResolveRoleSkills(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "capcom-skills", "greeter"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldRoot := openaiHomeRoot
+	defer func() { openaiHomeRoot = oldRoot }()
+
+	openaiHomeRoot = root
+	if got := resolveRoleSkills("gpt-5.6-terra#capcom"); got != filepath.Join(root, "capcom-skills") {
+		t.Errorf("role skills = %q", got)
+	}
+	if got := resolveRoleSkills("gpt-5.6-terra#nosuchrole"); got != "" {
+		t.Errorf("missing skills dir must resolve empty, got %q", got)
+	}
+	if got := resolveRoleSkills("gpt-5.6-terra"); got != "" {
+		t.Errorf("no role must resolve empty, got %q", got)
+	}
+	openaiHomeRoot = ""
+	if got := resolveRoleSkills("gpt-5.6-terra#capcom"); got != "" {
+		t.Errorf("no home root must resolve empty, got %q", got)
 	}
 }
 

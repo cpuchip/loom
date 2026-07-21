@@ -94,20 +94,44 @@ func SetOpenAIHomeRoot(root string) { openaiHomeRoot = root }
 // reason). The mount is ro because a shim seat reads context and writes ONLY
 // through its MCP hinge; the workdir is never an exfil channel. Missing dir =
 // no mount (workdir ""), same never-fail degradation as the home.
+//
+// Home and workdir resolve INDEPENDENTLY: a host-run seat (codex/copilot/
+// opencode) legitimately has a <role>-workdir with no <role>-claude-home —
+// requiring a claude home just to unlock a codex seat's grounding was a
+// claude-shaped assumption, dropped when serve-side skills landed.
 func resolveModelHome(model string) (bareModel, home, workdir string) {
 	base, role, found := strings.Cut(model, "#")
 	if !found || role == "" || openaiHomeRoot == "" {
 		return model, openaiClaudeHome, ""
 	}
-	h := filepath.Join(openaiHomeRoot, role+"-claude-home")
-	if fi, err := os.Stat(h); err != nil || !fi.IsDir() {
-		return base, openaiClaudeHome, ""
+	home = openaiClaudeHome
+	if h := filepath.Join(openaiHomeRoot, role+"-claude-home"); isDir(h) {
+		home = h
 	}
-	w := filepath.Join(openaiHomeRoot, role+"-workdir")
-	if fi, err := os.Stat(w); err != nil || !fi.IsDir() {
-		return base, h, ""
+	if w := filepath.Join(openaiHomeRoot, role+"-workdir"); isDir(w) {
+		workdir = w
 	}
-	return base, h, w
+	return base, home, workdir
+}
+
+// resolveRoleSkills returns the role's authored-skills source directory
+// (<root>/<role>-skills) for a "<model>#<role>" name — the serve-side twin of
+// `loom run --skills`. "" when the model carries no role, no --openai-home-root
+// is set, or the directory is missing (a config gap never fails a request).
+func resolveRoleSkills(model string) string {
+	_, role, found := strings.Cut(model, "#")
+	if !found || role == "" || openaiHomeRoot == "" {
+		return ""
+	}
+	if d := filepath.Join(openaiHomeRoot, role+"-skills"); isDir(d) {
+		return d
+	}
+	return ""
+}
+
+func isDir(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }
 
 // shimBackendFor maps the shim's BARE model name (role already split off by
@@ -369,6 +393,19 @@ func (s *server) serveOpenAI(w http.ResponseWriter, r *http.Request) {
 	// set (it would strip the only wall — codex --dangerously-bypass…, copilot
 	// --allow-all), ClaudeHome/WorkdirRO are container concepts they ignore, and
 	// the role workdir is a host path they can cd into directly.
+	//
+	// Serve-side skills (#6 extended to the shim): a CLAUDE seat already gets
+	// skills through its mounted role home (<role>-claude-home/skills/ IS the
+	// container's ~/.claude/skills/) — nothing to deliver. A HOST-RUN seat reads
+	// skills from its session workdir instead, so hand Open the role's authored
+	// skills (<root>/<role>-skills) and let mirrorSkills place them in the
+	// backend's own skill dir (.agents/ or .claude/) inside the role workdir —
+	// the same author-once path `loom run --skills` uses. Only when a role
+	// workdir exists: without one the seat's cwd is the serve process's own,
+	// and loom does not scribble skill trees into the operator's cwd.
+	if agent != "claude" && workdir != "" {
+		baseOpts.SkillsDir = resolveRoleSkills(req.Model)
+	}
 	open := func(resume string) (Session, error) {
 		o := baseOpts
 		o.Resume = resume // sticky cold path: continue the living session by id

@@ -38,11 +38,29 @@ pins, everything else → claude) instead of hardwiring claude:
 
 | backend | MCP carrier | skills |
 |---|---|---|
-| **claude** | `--mcp-config <file>` natively | `~/.claude/skills/` (ships in the mounted `--claude-home`) + project `.claude/skills/` |
-| **codex** | translated → `-c mcp_servers.<name>.…` overrides per invocation (mcpbridge.go; **live tool-call proven**, codex-cli 0.144.6; local sessions only) | `$CODEX_HOME/skills/` + project `.codex/skills/` + project `.agents/skills/` (discovery verified via `codex debug prompt-input`; does NOT read `.claude/skills/`) |
-| **copilot** | `--additional-mcp-config @<file>` natively (same JSON shape) | project `.claude/skills/` / `.github/skills/` / `.agents/skills/` + personal `~/.copilot/skills/` / `~/.agents/skills/` (verified via `copilot skill list`; no per-invocation flag — discovery is directory-driven) |
-| **opencode** | translated → temp `opencode.json` via `OPENCODE_CONFIG` env (mcpbridge.go; **live tool-call proven**, opencode-ai 1.17.15; local sessions only — headless permission gating may need `--skip-permissions`) | native `skill` tool, on-demand: `.opencode/skills/` + **`.claude/skills/`** + `~/.agents/skills/` + `~/.config/opencode/skills/` (verified via `opencode debug skill`, opencode-ai 1.17.15 — it DOES read Claude-format skills) |
+| **claude** | `--mcp-config <file>` natively; **remote**: the local file is planted on the target (base64 + EXIT-trap temp file) and the flag repointed — the local file is the source of truth (remote+isolate mounts it into the sandbox) | `~/.claude/skills/` (ships in the mounted `--claude-home`) + project `.claude/skills/` |
+| **codex** | translated → `-c mcp_servers.<name>.…` overrides per invocation (mcpbridge.go; **live tool-call proven**, codex-cli 0.144.6); **remote**: the same overrides now survive `bash -lc` — every argv element is quoted (the raw join used to mangle the TOML; UNVERIFIED on a real remote — no codex on the practice box) | `$CODEX_HOME/skills/` + project `.codex/skills/` + project `.agents/skills/` (discovery verified via `codex debug prompt-input`; does NOT read `.claude/skills/`) |
+| **copilot** | `--additional-mcp-config @<file>` natively (same JSON shape); **remote**: local file planted on the target, `@` repointed (argv-fixture tested; UNVERIFIED on a real remote) | project `.claude/skills/` / `.github/skills/` / `.agents/skills/` + personal `~/.copilot/skills/` / `~/.agents/skills/` (verified via `copilot skill list`; no per-invocation flag — discovery is directory-driven) |
+| **opencode** | translated → temp `opencode.json` via `OPENCODE_CONFIG` env (mcpbridge.go; **live tool-call proven**, opencode-ai 1.17.15 — headless permission gating may need `--skip-permissions`); **remote**: the translated doc is planted on the target each turn and `OPENCODE_CONFIG` exported in the same script (argv-fixture tested; UNVERIFIED on a real remote) | native `skill` tool, on-demand: `.opencode/skills/` + **`.claude/skills/`** + `~/.agents/skills/` + `~/.config/opencode/skills/` (verified via `opencode debug skill`, opencode-ai 1.17.15 — it DOES read Claude-format skills) |
 | **agy** | not carried (structurally limited, below) | none |
+
+**Remote MCP, the contract:** when `--mcp-config` names a file that exists **locally**, that file is the
+single source of truth — its bytes ride inside the remote script as base64, land in a private `/tmp` file,
+and an `EXIT` trap removes them when the CLI ends. A path with **no** local file keeps the legacy meaning:
+it names a file already on the remote box. Either way the servers the config names must resolve on
+whichever box the agent runs. Live status (2026-07-21, NOCIX): the claude materialization is proven to the
+exact startup gate — a planted config passes claude's MCP validation (a missing one exits at startup with
+"MCP config file not found"); a full remote MCP *tool call* is UNVERIFIED there (the box's claude auth had
+expired, and loom does not run login flows).
+
+**Serve-side skills** (`loom serve --openai-home-root <root>`): a shim seat named `<model>#<role>` gets its
+role's skills too. A **claude** seat already reads them from the mounted role home — author into
+`<root>/<role>-claude-home/skills/`. A **host-run** seat (codex/copilot/opencode) reads from its session
+workdir instead, so author into `<root>/<role>-skills/` and loom mirrors them into `<root>/<role>-workdir`
+at open (the exact `--skills` path). The role workdir now resolves independently of any claude home — a
+codex seat needs no `<role>-claude-home` marker. **Live-proven 2026-07-21:** a real codex seat driven
+through a scratch serve (`model: codex#capcom`) read its mirrored `.agents/skills/greeter/SKILL.md` and
+returned the planted magic word.
 
 **The cross-provider skills lever is a directory, not a protocol** — the harnesses split on which they read:
 `.claude/skills/` reaches claude + copilot + opencode; `.agents/skills/` reaches codex + copilot + opencode.

@@ -305,6 +305,23 @@ const consultDirective = "CONSULT MODE (read-only). You are being consulted for 
 // through ssh then docker. remote+isolate resolves docker paths on the remote ($HOME).
 func claudeCmd(ctx context.Context, bin string, opts SessionOpts, claudeArgs []string) *exec.Cmd {
 	if opts.Remote != "" {
+		// Remote MCP: when --mcp-config names a file that exists LOCALLY, that
+		// file is the source of truth — materialize it onto the remote (base64
+		// through the script, EXIT-trap cleanup; see remotemcp.go) and point
+		// claude at the planted path. A path with no local file keeps the legacy
+		// contract: it names a file on the REMOTE, passed through untouched.
+		prelude := ""
+		if pre, remotePath, ok := remoteMCPFromFile(opts.MCPConfig); ok {
+			prelude = pre
+			if opts.Isolate {
+				// the sandboxed claude sees only its mounts — layer the planted
+				// file in read-only and point --mcp-config inside the container
+				opts.ExtraMounts = append(append([]string(nil), opts.ExtraMounts...), remotePath+":/loom-mcp.json:ro")
+				claudeArgs = replaceFlagValue(claudeArgs, "--mcp-config", "/loom-mcp.json")
+			} else {
+				claudeArgs = replaceFlagValue(claudeArgs, "--mcp-config", remotePath)
+			}
+		}
 		var inner string
 		if opts.Isolate {
 			// remote + isolate: a sandboxed claude ON the remote box. The docker
@@ -320,7 +337,7 @@ func claudeCmd(ctx context.Context, bin string, opts SessionOpts, claudeArgs []s
 		// run inside a LOGIN shell so the remote's full PATH loads — a plain
 		// `ssh host cmd` uses a non-interactive shell that misses nvm / npm-global
 		// installs, so `claude`/`docker` read as "command not found".
-		return exec.CommandContext(ctx, "ssh", "-T", opts.Remote, "bash", "-lc", shellQuote(inner))
+		return exec.CommandContext(ctx, "ssh", "-T", opts.Remote, "bash", "-lc", shellQuote(prelude+inner))
 	}
 	if opts.Isolate {
 		a := dockerRunArgs(opts, claudeArgs)

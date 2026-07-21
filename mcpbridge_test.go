@@ -171,7 +171,9 @@ func TestOpencodeOpenWritesAndClosesTempConfig(t *testing.T) {
 }
 
 // TestCodexOpenTranslatesMCP drives the real codex Open: a good config yields
-// the -c overrides, a bad one fails loudly, remote skips.
+// the -c overrides (local AND remote — the remote transport now quotes every
+// argv element, so the TOML values survive; see remotemcp_test.go), a bad one
+// fails loudly.
 func TestCodexOpenTranslatesMCP(t *testing.T) {
 	sess, err := CodexBackend{}.Open(context.Background(), SessionOpts{MCPConfig: writeBridgeFixture(t, bridgeFixture)})
 	if err != nil {
@@ -188,7 +190,7 @@ func TestCodexOpenTranslatesMCP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sess.(*codexSession).mcpArgs) != 0 {
-		t.Error("a remote codex session must not carry -c overrides (bash -lc would mangle the TOML)")
+	if len(sess.(*codexSession).mcpArgs) == 0 {
+		t.Error("a remote codex session now carries the translated -c overrides (the local file is the source of truth)")
 	}
 }

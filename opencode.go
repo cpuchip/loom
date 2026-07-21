@@ -38,11 +38,14 @@ import (
 // Isolate is not enforceable here — wall it externally (docker/remote) when it
 // matters.
 //
-// MCPConfig IS honored (local sessions): the claude-format JSON is translated at
-// Open into an opencode config document written to a temp file and handed to
-// every spawned turn via the OPENCODE_CONFIG env var (see mcpbridge.go; read
-// path verified live, opencode-ai 1.17.15). Remote sessions still ignore it —
-// the temp file exists only on this box. NOTE: in headless run mode opencode's
+// MCPConfig IS honored, local AND remote: the claude-format JSON is translated
+// at Open into an opencode config document (see mcpbridge.go; read path
+// verified live, opencode-ai 1.17.15). Locally it is written to a temp file
+// handed to every spawned turn via the OPENCODE_CONFIG env var; for a --remote
+// session the translated document is planted on the TARGET each turn (base64
+// into /tmp with an EXIT-trap, see remotemcp.go) and OPENCODE_CONFIG exported
+// in the same script — the local file stays the source of truth, though the
+// servers it names must resolve on the remote box. NOTE: in headless run mode opencode's
 // permission config still gates tool calls (unapproved tools fail closed), so
 // an MCP-wired seat may additionally need permissions granted in the user's
 // opencode config, or SkipPermissions (--auto). Other claude-specific opts
@@ -65,11 +68,19 @@ func (b OpencodeBackend) Open(ctx context.Context, opts SessionOpts) (Session, e
 		return nil, fmt.Errorf("opencode: %w", err)
 	}
 	s := &opencodeSession{bin: bin, opts: opts, sessionID: opts.Resume}
-	if opts.MCPConfig != "" && opts.Remote == "" {
+	if opts.MCPConfig != "" {
 		data, err := opencodeMCPConfig(opts.MCPConfig)
 		if err != nil {
 			// Loud at Open, like claude's own startup exit on a bad --mcp-config.
 			return nil, fmt.Errorf("opencode: mcp-config: %w", err)
+		}
+		if opts.Remote != "" {
+			// Remote: the LOCAL file is still the source of truth — the translated
+			// document rides each turn's remote script (base64 + EXIT-trap temp
+			// file, see remotemcp.go) with OPENCODE_CONFIG pointed at it THERE.
+			// The servers it names must of course resolve on the remote box.
+			s.mcpRemoteDoc = data
+			return s, nil
 		}
 		f, err := os.CreateTemp("", "loom-opencode-mcp-*.json")
 		if err != nil {
@@ -98,6 +109,7 @@ type opencodeSession struct {
 	cur           *exec.Cmd
 	interrupted   bool
 	mcpConfigPath string // temp opencode.json translated from opts.MCPConfig at Open ("" = none); removed on Close
+	mcpRemoteDoc  []byte // (remote sessions) the translated opencode.json, planted on the target each turn
 }
 
 func (s *opencodeSession) Send(ctx context.Context, prompt string) (Reply, error) {
@@ -123,12 +135,20 @@ func (s *opencodeSession) SendStream(ctx context.Context, prompt string, onEvent
 	s.interrupted = false
 	s.mu.Unlock()
 
-	cmd := onehotCmd(ctx, resolveOpencodeBin(s.bin), s.opts, opencodeArgs(s.opts, resume, prompt))
+	// Remote MCP rides the turn's script: plant the translated config in /tmp on
+	// the target and export OPENCODE_CONFIG for just this invocation. Each turn
+	// re-plants (one process per turn); the EXIT trap removes it.
+	prelude := ""
+	if s.opts.Remote != "" && len(s.mcpRemoteDoc) > 0 {
+		pre, remotePath := remoteMaterialize(s.mcpRemoteDoc)
+		prelude = pre + "export OPENCODE_CONFIG=" + remotePath + " && "
+	}
+	cmd := onehotCmd(ctx, resolveOpencodeBin(s.bin), s.opts, opencodeArgs(s.opts, resume, prompt), prelude)
 	if mcpPath != "" {
 		// Hand every turn the translated MCP servers. OPENCODE_CONFIG is the only
 		// per-invocation config channel opencode offers (no CLI flag); set only
 		// when a bridge file exists so a plain session inherits the environment
-		// untouched. (Local-only by construction — see Open.)
+		// untouched. (Local sessions; a remote session exports it in the script.)
 		cmd.Env = append(os.Environ(), "OPENCODE_CONFIG="+mcpPath)
 	}
 	stdout, err := cmd.StdoutPipe()
@@ -310,8 +330,12 @@ func resolveNpmishBin(bin string) string {
 // the remote form quotes EVERY element (prompts contain spaces and newlines):
 //
 //	direct → <bin> …args                                        (cwd = Workdir)
-//	remote → ssh -T <host> bash -lc 'cd <dir> && <bin> …args'   (the REMOTE box's CLI)
-func onehotCmd(ctx context.Context, bin string, opts SessionOpts, args []string) *exec.Cmd {
+//	remote → ssh -T <host> bash -lc '<prelude>cd <dir> && <bin> …args'
+//
+// remotePrelude is an already-shell-safe script fragment (ending in "&& ")
+// injected before the cd+command on the REMOTE — the hook the remote-MCP
+// materialization rides (see remotemcp.go). Ignored for a local spawn.
+func onehotCmd(ctx context.Context, bin string, opts SessionOpts, args []string, remotePrelude string) *exec.Cmd {
 	if opts.Remote != "" {
 		parts := make([]string, 0, len(args)+1)
 		parts = append(parts, bin)
@@ -322,7 +346,7 @@ func onehotCmd(ctx context.Context, bin string, opts SessionOpts, args []string)
 		if opts.Workdir != "" {
 			inner = "cd " + shellQuote(opts.Workdir) + " && " + inner
 		}
-		return exec.CommandContext(ctx, "ssh", "-T", opts.Remote, "bash", "-lc", shellQuote(inner))
+		return exec.CommandContext(ctx, "ssh", "-T", opts.Remote, "bash", "-lc", shellQuote(remotePrelude+inner))
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	if opts.Workdir != "" {
